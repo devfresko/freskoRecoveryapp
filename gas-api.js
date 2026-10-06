@@ -1,10 +1,11 @@
+
 // ============================================================
 // gas-api.js — JSONP bridge to the Fresko Apps Script backend
 // ============================================================
 // This file polyfills `google.script.run` so that every existing
 // `google.script.run.withSuccessHandler(...).withFailureHandler(...).xxx(args)`
 // call already written in Index.html keeps working unchanged — even though
-// this page is now hosted on GitHub Pages (a different origin) instead of
+// this page is now hosted on Vercel (a different origin) instead of
 // inside Apps Script's own sandboxed iframe.
 //
 // How it works: instead of the real google.script.run RPC channel (which only
@@ -16,16 +17,18 @@
 // Web App URL (Sheet menu → "Payment Follow-up" → "Show API URL (for app.js)").
 // ============================================================
 
-var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxq7kf1PkE7EWQwXeXM5pxagcclwK1NtHfjGGobnkC_aoLCDbetuHzrHb33xtjNTeBj/exec';
+var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz5IAbcgCFE2JvXpvc_BacKmbNCRBVQsfFnZ9kuMixNcJFv2V1exBxELWtwItVpOk6t/exec';
 
 (function () {
   var _cbIdx = 0;
-  var JSONP_TIMEOUT_MS = 35000;
+  var JSONP_TIMEOUT_MS = 45000;
   // Keep each JSONP request's query string comfortably under safe URL-length
   // limits. Only matters for calls with big array payloads (bulk upload).
   var MAX_ARGS_JSON_LEN = 6000;
 
-  function _rawJsonpCall(fnName, args, onSuccess, onFailure) {
+  function _rawJsonpCall(fnName, args, onSuccess, onFailure, _attempt) {
+    var attempt = _attempt || 1;
+    var maxAttempts = 3;
     var cbName = '_gascb' + (++_cbIdx);
     var timeoutId;
 
@@ -33,7 +36,19 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxq7kf1PkE7EWQwXeXM5p
       clearTimeout(timeoutId);
       try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
       var tag = document.getElementById('_s_' + cbName);
-      if (tag) tag.parentNode.removeChild(tag);
+      if (tag && tag.parentNode) tag.parentNode.removeChild(tag);
+    }
+
+    function fail(err) {
+      cleanup();
+      // Auto-retry on network/timeout (Apps Script cold start is common)
+      if (attempt < maxAttempts) {
+        setTimeout(function () {
+          _rawJsonpCall(fnName, args, onSuccess, onFailure, attempt + 1);
+        }, 600 * attempt);
+        return;
+      }
+      if (onFailure) onFailure(err);
     }
 
     window[cbName] = function (result) {
@@ -42,8 +57,7 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxq7kf1PkE7EWQwXeXM5p
     };
 
     timeoutId = setTimeout(function () {
-      cleanup();
-      if (onFailure) onFailure({ message: 'Request timed out. Please check your connection and try again.' });
+      fail({ message: 'Request timed out (try ' + attempt + '/' + maxAttempts + '). Check connection.' });
     }, JSONP_TIMEOUT_MS);
 
     var url = GAS_API_URL +
@@ -51,12 +65,17 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxq7kf1PkE7EWQwXeXM5p
       '&fn=' + encodeURIComponent(fnName) +
       '&args=' + encodeURIComponent(JSON.stringify(args || []));
 
+    // Guard: URL too long → fail early with clear message
+    if (url.length > 18000) {
+      fail({ message: 'Request too large for network. Try fewer rows or refresh and retry.' });
+      return;
+    }
+
     var s = document.createElement('script');
     s.id = '_s_' + cbName;
     s.src = url;
     s.onerror = function () {
-      cleanup();
-      if (onFailure) onFailure({ message: 'Network error while reaching the server.' });
+      fail({ message: 'Network error while reaching the server.' });
     };
     document.head.appendChild(s);
   }
@@ -116,7 +135,7 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxq7kf1PkE7EWQwXeXM5p
   }
 
   // Retail PDF rows can be large — chunk checkRetailDuplicates + commitRetailData
-  var RETAIL_ROWS_PER_CHUNK = 15;
+  var RETAIL_ROWS_PER_CHUNK = 8;
 
   function _chunkedRetailCheck(args, onSuccess, onFailure) {
     var rows = args[0] || [];
@@ -167,6 +186,34 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxq7kf1PkE7EWQwXeXM5p
     next();
   }
 
+  // ---- Retail commit: slim rows + size-based chunks ----
+  // Server (commitRetailData) only reads Sale_Date, Customer_Name, Qty, Amount
+  // (+ dateRange, which falls back to meta.dateRange). Sending only those keeps
+  // each row ~4x smaller, so one JSONP call carries ~40-50 rows instead of 8.
+  var RETAIL_MAX_ENC_LEN = 6500; // max encoded `args` length per request
+
+  function _slimRetailRow(r, dr) {
+    var o = {
+      Sale_Date: r.Sale_Date,
+      Customer_Name: r.Customer_Name || r.customer || '',
+      Qty: (r.Qty != null ? r.Qty : r.Qty_Summary),
+      Amount: (r.Amount != null ? r.Amount : r.Total_Amount)
+    };
+    if (r.dateRange && r.dateRange !== dr) o.dateRange = r.dateRange;
+    return o;
+  }
+
+  function _chunkByEncodedLen(rows, maxLen) {
+    var chunks = [], cur = [], len = 2;
+    for (var k = 0; k < rows.length; k++) {
+      var l = encodeURIComponent(JSON.stringify(rows[k])).length + 3; // +3 = encoded comma
+      if (cur.length && len + l > maxLen) { chunks.push(cur); cur = []; len = 2; }
+      cur.push(rows[k]); len += l;
+    }
+    if (cur.length) chunks.push(cur);
+    return chunks;
+  }
+
   function _chunkedRetailCommit(args, onSuccess, onFailure) {
     var rows = args[0] || [];
     var meta = args[1] || {};
@@ -174,16 +221,18 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxq7kf1PkE7EWQwXeXM5p
       onSuccess({ success: true, written: 0, skipped: meta.dupCount || 0 });
       return;
     }
-    var chunks = [];
-    for (var ci = 0; ci < rows.length; ci += RETAIL_ROWS_PER_CHUNK) {
-      chunks.push(rows.slice(ci, ci + RETAIL_ROWS_PER_CHUNK));
-    }
+    var slim = rows.map(function (r) { return _slimRetailRow(r, meta.dateRange); });
+    var metaLen = encodeURIComponent(JSON.stringify(meta)).length;
+    var chunks = _chunkByEncodedLen(slim, Math.max(2500, RETAIL_MAX_ENC_LEN - metaLen));
     var merged = { success: true, written: 0, skipped: meta.dupCount || 0 };
     var i = 0;
     function next() {
       if (i >= chunks.length) {
         onSuccess(merged);
         return;
+      }
+      if (typeof window.__chunkProgress === 'function') {
+        window.__chunkProgress('Batch ' + (i + 1) + ' / ' + chunks.length + ' — ' + merged.written + ' rows saved');
       }
       // Only pass full meta on first chunk (log once); later chunks get minimal meta
       var chunkMeta = (i === 0) ? meta : {
@@ -216,8 +265,8 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxq7kf1PkE7EWQwXeXM5p
         _rawJsonpCall(fnName, args, onSuccess, onFailure);
       }
     } else if (fnName === 'commitRetailData') {
-      var argsJson2 = JSON.stringify(args || []);
-      if (argsJson2.length > MAX_ARGS_JSON_LEN) {
+      // always go through the slimming/size-aware chunker (empty rows -> plain call)
+      if ((args && args[0] && args[0].length)) {
         _chunkedRetailCommit(args, onSuccess, onFailure);
       } else {
         _rawJsonpCall(fnName, args, onSuccess, onFailure);
