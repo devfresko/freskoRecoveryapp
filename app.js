@@ -1,5 +1,3 @@
-
-
 // app.js ke top pe add karein
 var _debouncedRenderParties = _debounce(renderParties, 250);
 var _debouncedRenderInvoices = _debounce(renderInvoices, 250);
@@ -202,7 +200,7 @@ var _idb = (function() {
 
       // Nav items — retail mode
       var RETAIL_NAV_ITEMS = [
-        'nav-retailDashboard', 'nav-retailUpload', 'nav-retailSales',
+        'nav-retailDashboard', 'nav-retailUpload', 'nav-retailSales', 'nav-retailAging',
         'nav-retailCustomers', 'nav-retailPayments',
         'nav-retailFollowups', 'nav-retailPromises', 'nav-retailEscalations'
       ];
@@ -537,27 +535,17 @@ function _coalescedGetAll(uname, ts, callback) {
 
 
 function manualRefresh() {
+  // True force: server CacheService bust + sheet re-read + retail
   var icon = document.getElementById('refresh-icon');
   if (icon) { icon.classList.add('spinning'); icon.style.pointerEvents = 'none'; }
-  var uname = (USER && USER.name) || URL_NAME || '';
-  _coalescedGetAll(uname, '0', function(data, err) { // ts='0' forces full fetch
-    if (icon) { icon.classList.remove('spinning'); icon.style.pointerEvents = ''; }
-    if (err || !data || !data.success) {
-      Swal.fire('Error', (data && data.error) || (err && err.message) || 'Refresh failed', 'error');
-      return;
+  _forceFullRefresh(true);
+  // icon stop after process ends
+  var t = setInterval(function() {
+    if (!window._forceRefreshing) {
+      clearInterval(t);
+      if (icon) { icon.classList.remove('spinning'); icon.style.pointerEvents = ''; }
     }
-     DB = data;
-    _lastUpdate = data.lastUpdate || _lastUpdate;
-    _idb.set('mainDB', data);
-    _updateBadges();
-    _populateFilters();
-    _buildAllPartySS();
-    _reRenderCurrent();
-    _refreshRetailOutstanding();
-    if (typeof _refreshRetailViews === 'function') _refreshRetailViews();
-    var tb = document.getElementById('tb-crumb');
-    if (tb) { var prev = tb.textContent; tb.textContent = '✓ Refreshed'; setTimeout(() => { tb.textContent = prev; }, 1200); }
-  });
+  }, 400);
 }
 
 
@@ -833,6 +821,9 @@ function nav(v) {
     case 'retailSales':
       if (typeof renderRetailSales === 'function') renderRetailSales();
       break;
+    case 'retailAging':
+      if (typeof renderRetailAging === 'function') renderRetailAging();
+      break;
 
     case 'retailCustomers':
       if (typeof renderRetailCustomers === 'function') renderRetailCustomers();
@@ -903,17 +894,71 @@ function nav(v) {
       }
       function isPaid(inv) { return pending(inv) <= 0 || inv.status === 'Written-Off' || inv.status === 'Paid'; }
 
+      /** Parse dd/MM/yyyy or yyyy-MM-dd (optional time) as LOCAL date — never UTC */
       function parseIST(str) {
         if (!str) return null;
-        const s = str.toString().split(' ')[0].split('/');
-        if (s.length < 3) return null;
-        return new Date(+s[2], +s[1] - 1, +s[0]);
+        if (str instanceof Date) {
+          return isNaN(str.getTime()) ? null : str;
+        }
+        var raw = str.toString().trim();
+        // ISO datetime: 2026-10-05T10:30:00 or 2026-10-05T10:30:00.000Z
+        var iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+        if (iso) {
+          return new Date(+iso[1], +iso[2] - 1, +iso[3], +(iso[4] || 0), +(iso[5] || 0), +(iso[6] || 0));
+        }
+        // dd/MM/yyyy [HH:mm[:ss]]
+        var parts = raw.split(' ');
+        var dpart = parts[0].split('/');
+        if (dpart.length < 3) return null;
+        var hh = 0, mm = 0, ss = 0;
+        if (parts[1]) {
+          var t = parts[1].split(':');
+          hh = +t[0] || 0; mm = +t[1] || 0; ss = +t[2] || 0;
+        }
+        return new Date(+dpart[2], +dpart[1] - 1, +dpart[0], hh, mm, ss);
+      }
+
+      /** Local calendar date as yyyy-MM-dd (for <input type="date">) — NOT UTC */
+      function localDateISO(d) {
+        d = d || new Date();
+        return d.getFullYear() + '-' +
+          String(d.getMonth() + 1).padStart(2, '0') + '-' +
+          String(d.getDate()).padStart(2, '0');
+      }
+
+      /** Local datetime as yyyy-MM-ddTHH:mm (for datetime-local) — NOT UTC */
+      function localDateTimeISO(d) {
+        d = d || new Date();
+        return localDateISO(d) + 'T' +
+          String(d.getHours()).padStart(2, '0') + ':' +
+          String(d.getMinutes()).padStart(2, '0');
+      }
+
+      /** Format Date or yyyy-MM-dd string → dd/MM/yyyy in LOCAL tz */
+      function fmtLocalDate(d) {
+        if (!d) return '';
+        var dt = (d instanceof Date) ? d : parseIST(d);
+        if (!dt || isNaN(dt.getTime())) {
+          // last resort: yyyy-MM-dd string split
+          var m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+          if (m) return m[3] + '/' + m[2] + '/' + m[1];
+          return String(d);
+        }
+        return String(dt.getDate()).padStart(2, '0') + '/' +
+          String(dt.getMonth() + 1).padStart(2, '0') + '/' + dt.getFullYear();
+      }
+
+      /** Format Date → dd/MM/yyyy HH:mm:ss local */
+      function fmtLocalDateTime(d) {
+        d = d || new Date();
+        return fmtLocalDate(d) + ' ' +
+          String(d.getHours()).padStart(2, '0') + ':' +
+          String(d.getMinutes()).padStart(2, '0') + ':' +
+          String(d.getSeconds()).padStart(2, '0');
       }
 
       function todayStr() {
-        const d = new Date();
-        return String(d.getDate()).padStart(2, '0') + '/' +
-          String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+        return fmtLocalDate(new Date());
       }
       function isToday(dtStr) {
         if (!dtStr) return false;
@@ -971,8 +1016,8 @@ function nav(v) {
       }
 
       function _setDefaultDates() {
-        const today = new Date().toISOString().split('T')[0];
-        const now = new Date().toISOString().slice(0, 16);
+        const today = localDateISO();
+        const now = localDateTimeISO();
         ['ai-invdate', 'rp-date', 'rpt-date'].forEach(id => { const el = document.getElementById(id); if (el) el.value = today; });
         const fdt = document.getElementById('fu-dt'); if (fdt) fdt.value = now;
       }
@@ -2541,10 +2586,7 @@ function shortPage(d) {
         const cd = parseFloat(document.getElementById('ai-cd-disc').value) || 0;
         const net = gross - cgst - sgst - igst - tcs - other - cd;
 
-        const fmtDate = d => {
-          const dt = new Date(d);
-          return String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0') + '/' + dt.getFullYear();
-        };
+        const fmtDate = d => fmtLocalDate(d);
 
         const data = {
           partyID, partyName,
@@ -2780,7 +2822,7 @@ function shortPage(d) {
         if (modeEl) modeEl.value = 'RTGS';
         // Reset date to today
         const dateEl = document.getElementById('rp-date');
-        if (dateEl) dateEl.value = new Date().toISOString().split('T')[0];
+        if (dateEl) dateEl.value = localDateISO();
         // Reset modal searchable select
         const inp1 = document.getElementById('rp-modal-ss-inp');
         if (inp1) { inp1.value = ''; inp1.dataset.val = ''; }
@@ -2819,7 +2861,7 @@ function shortPage(d) {
           return;
         }
 
-        const fmtDate = d => { const dt = new Date(d); return String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0') + '/' + dt.getFullYear(); };
+        const fmtDate = d => fmtLocalDate(d);
 
         // Allocate cash across invoices. When cash=0 (TDS-only), still include invoice
         // with amount=0 so backend closes it via TDS.
@@ -2960,8 +3002,12 @@ function shortPage(d) {
         }
 
         const dtRaw = document.getElementById('fu-dt').value;
-        const fmtDT = dtRaw ? dtRaw.replace('T', ' ') : '';
-        const fmtDate = d => d ? (() => { const dt = new Date(d); return String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0') + '/' + dt.getFullYear(); })() : '';
+        // datetime-local is local wall-clock — format as dd/MM/yyyy HH:mm:ss (IST display)
+        const fmtDT = dtRaw ? (function() {
+          var dt = parseIST(dtRaw);
+          return dt ? fmtLocalDateTime(dt) : dtRaw.replace('T', ' ') + ':00';
+        })() : fmtLocalDateTime(new Date());
+        const fmtDate = d => d ? fmtLocalDate(d) : '';
 
         const data = {
           partyID: isRetailFU ? 'RETAIL' : partyID,
@@ -2985,19 +3031,47 @@ function shortPage(d) {
           attachmentURL: document.getElementById('fu-attach').value
         };
 
-        Swal.fire({ title: 'Saving...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+        // Optimistic: close modal + toast immediately, sync in background
+        var tempId = 'TMP-' + Date.now();
+        var optimistic = Object.assign({}, data, {
+          followUpID: tempId,
+          promiseKept: data.promiseKept || 'Pending',
+          loggedBy: (USER && USER.name) || URL_NAME || '',
+          loggedOn: data.datetime
+        });
+        DB.followups = DB.followups || [];
+        DB.followups.unshift(optimistic);
+        closeFUModal();
+        _optimisticToast('✓ Follow-up saved');
+        if (typeof _reRenderCurrent === 'function') _reRenderCurrent();
+        if (typeof renderRetailFollowups === 'function') {
+          try { renderRetailFollowups(); } catch (e) {}
+        }
+        if (typeof _paintRetailDashboardFollowups === 'function') {
+          try { _paintRetailDashboardFollowups(); } catch (e) {}
+        }
+
         google.script.run
           .withSuccessHandler(r => {
-            if (r.success) {
-              Swal.fire({ icon: 'success', title: 'Follow-up Logged!', text: r.msg, timer: 1800, showConfirmButton: false });
-              closeFUModal();
-              _silentDataRefresh();
-              if (typeof renderRetailFollowups === 'function' && document.getElementById('view-retailFollowups') && document.getElementById('view-retailFollowups').classList.contains('active')) {
-                setTimeout(function() { renderRetailFollowups(); }, 600);
-              }
-            } else Swal.fire('Error', r.error, 'error');
+            if (r && r.success) {
+              // Replace temp id with real id
+              var fu = (DB.followups || []).find(function(f) { return f.followUpID === tempId; });
+              if (fu) fu.followUpID = r.followUpID || tempId;
+              _idb.set('mainDB', DB);
+              // Soft refresh lastUpdate only — no full reload spinner
+              if (typeof _silentDataRefresh === 'function') _silentDataRefresh();
+            } else {
+              // Rollback
+              DB.followups = (DB.followups || []).filter(function(f) { return f.followUpID !== tempId; });
+              if (typeof _reRenderCurrent === 'function') _reRenderCurrent();
+              Swal.fire('Error', (r && r.error) || 'Save failed', 'error');
+            }
           })
-          .withFailureHandler(e => Swal.fire('Error', e.message, 'error'))
+          .withFailureHandler(e => {
+            DB.followups = (DB.followups || []).filter(function(f) { return f.followUpID !== tempId; });
+            if (typeof _reRenderCurrent === 'function') _reRenderCurrent();
+            Swal.fire('Error', (e && e.message) || 'Network error', 'error');
+          })
           .saveFollowUp(data, URL_NAME);
       }
 
@@ -3135,8 +3209,11 @@ function shortPage(d) {
       // ============================================================
       async function processPDFFile(file) {
         document.getElementById('csv-status').style.display = 'none';
-        if (typeof pdfjsLib === 'undefined') {
+        if (typeof pdfjsLib === 'undefined' || !pdfjsLib.GlobalWorkerOptions.workerSrc) {
           if (window.__loadHeavyLibs) window.__loadHeavyLibs();
+          if (window.__waitLib) await window.__waitLib(function () { return typeof pdfjsLib !== 'undefined' && pdfjsLib.GlobalWorkerOptions.workerSrc; }, 15000);
+        }
+        if (typeof pdfjsLib === 'undefined') {
           showCSVStatus('error', 'PDF parser is still loading. Please wait a moment and try again.');
           return;
         }
@@ -4990,13 +5067,7 @@ function shortPage(d) {
         });
       }
 
-      (function() {
-        if (typeof XLSX === 'undefined') {
-          var script = document.createElement('script');
-          script.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
-          document.head.appendChild(script);
-        }
-      })();
+      // xlsx now lazy-loaded by window.__loadHeavyLibs (see index.html)
 
       function toggleDarkMode() {
         document.body.classList.toggle('dark');
@@ -5198,32 +5269,164 @@ async function _ruParseAll(pdf) {
   return { rows: rows, dateRange: dr };
 }
 
+/** Normalize any date string → dd/MM/yyyy for stable keys */
+function _ruNormDate(str) {
+  if (!str) return '';
+  if (str instanceof Date) {
+    return String(str.getDate()).padStart(2,'0') + '/' +
+      String(str.getMonth()+1).padStart(2,'0') + '/' + str.getFullYear();
+  }
+  var s = String(str).trim();
+  // yyyy-MM-dd
+  var iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    return iso[3].padStart(2,'0') + '/' + iso[2].padStart(2,'0') + '/' + iso[1];
+  }
+  // d/m/yyyy or dd/MM/yyyy
+  var p = s.split(/[\/\-.]/);
+  if (p.length >= 3) {
+    var d = p[0], m = p[1], y = p[2];
+    if (y.length === 2) y = '20' + y;
+    // if first part is year
+    if (d.length === 4) return p[2].padStart(2,'0') + '/' + p[1].padStart(2,'0') + '/' + d;
+    return String(parseInt(d,10)).padStart(2,'0') + '/' +
+      String(parseInt(m,10)).padStart(2,'0') + '/' + y;
+  }
+  return s;
+}
+
+/** Client-side aggregate + duplicate check using normalized keys */
+function _ruLocalDuplicateCheck(rows, dateRange, fileName) {
+  var agg = {};
+  (rows || []).forEach(function(row) {
+    var d = _ruNormDate(row.Sale_Date || '');
+    var c = String(row.Customer_Name || '').trim();
+    if (!d || !c) return;
+    var key = d + '||' + c.toLowerCase();
+    if (!agg[key]) {
+      agg[key] = {
+        Sale_Date: d, Customer_Name: c, Qty: 0, Amount: 0,
+        dateRange: dateRange || '', Qty_Summary: 0, Total_Amount: 0
+      };
+    }
+    agg[key].Qty += parseFloat(row.Qty) || 0;
+    agg[key].Amount += parseFloat(row.Amount) || 0;
+  });
+
+  var existing = {};
+  (_retailData.allRows || []).forEach(function(r) {
+    var d = _ruNormDate(r.saleDate || r.Sale_Date || '');
+    var c = String(r.customer || r.Customer_Name || '').trim().toLowerCase();
+    if (d && c) existing[d + '||' + c] = true;
+  });
+  // Also use compact key index if present
+  if (_retailData.keyIndex) {
+    Object.keys(_retailData.keyIndex).forEach(function(k) { existing[k] = true; });
+  }
+
+  var newRows = [], dupRows = [];
+  Object.keys(agg).forEach(function(k) {
+    var a = agg[k];
+    a.Qty = Math.round(a.Qty * 100) / 100;
+    a.Amount = Math.round(a.Amount * 100) / 100;
+    a.Qty_Summary = a.Qty;
+    a.Total_Amount = a.Amount;
+    a.isDuplicate = !!existing[k];
+    (a.isDuplicate ? dupRows : newRows).push(a);
+  });
+
+  var totalQty = newRows.reduce(function(s, r) { return s + (r.Qty || 0); }, 0);
+  var totalAmt = newRows.reduce(function(s, r) { return s + (r.Amount || 0); }, 0);
+
+  return {
+    success: true,
+    newRows: newRows,
+    dupRows: dupRows,
+    dateRange: dateRange,
+    pdfFilename: fileName || 'RETAIL SALE REGISTER',
+    summary: {
+      totalParsed: (rows || []).length,
+      newCount: newRows.length,
+      dupCount: dupRows.length,
+      totalQty: Math.round(totalQty * 100) / 100,
+      totalAmount: Math.round(totalAmt * 100) / 100
+    }
+  };
+}
+
+function _rebuildRetailKeyIndex() {
+  var idx = {};
+  (_retailData.allRows || []).forEach(function(r) {
+    var d = _ruNormDate(r.saleDate || r.Sale_Date || '');
+    var c = String(r.customer || r.Customer_Name || '').trim().toLowerCase();
+    if (d && c) idx[d + '||' + c] = true;
+  });
+  _retailData.keyIndex = idx;
+  try {
+    if (window._idb && _idb.set) _idb.set('retailKeyIndex', idx);
+  } catch (e) {}
+  return idx;
+}
+
 async function _ruProcessPDF(buf, fileName) {
   try {
+    _showProcess('PDF padh rahe hain...', 'Pages extract ho rahi hain');
+    if (typeof pdfjsLib === 'undefined' || !pdfjsLib.GlobalWorkerOptions.workerSrc) {
+      if (window.__loadHeavyLibs) window.__loadHeavyLibs();
+      if (window.__waitLib) await window.__waitLib(function () { return typeof pdfjsLib !== 'undefined' && pdfjsLib.GlobalWorkerOptions.workerSrc; }, 15000);
+    }
     var pdf = await pdfjsLib.getDocument(buf).promise;
+    _showProcess('PDF parse ho raha hai...', pdf.numPages + ' pages');
     var res = await _ruParseAll(pdf);
-    _ruSetProgress(80);
-    var det = document.getElementById('ru-det'); if (det) det.textContent = 'Duplicate check ho raha hai...';
+    _ruSetProgress(70);
+    var det = document.getElementById('ru-det');
+    if (det) det.textContent = 'Register load ho raha hai (duplicate check)...';
+    _showProcess('Duplicate check...', 'Sheet se latest register mil raha hai');
+
+    function finishLocal() {
+      _rebuildRetailKeyIndex();
+      var r = _ruLocalDuplicateCheck(res.rows, res.dateRange, fileName);
+      _ruParsing = false;
+      _ruSetProgress(100);
+      _hideProcess();
+      _retailData.parsed = r;
+      _retailStep = 2;
+      _renderRetailUpload();
+      if (r.summary && r.summary.dupCount > 0) {
+        _optimisticToast(r.summary.dupCount + ' duplicates skip hongi');
+      }
+    }
+
+    // Always refresh register for accurate dups (with timeout fallback)
+    var done = false;
+    var timer = setTimeout(function() {
+      if (done) return;
+      done = true;
+      finishLocal();
+    }, 8000);
 
     google.script.run
-      .withSuccessHandler(function(r) {
-        _ruParsing = false;
-        _ruSetProgress(100);
-        if (!r.success) {
-          document.getElementById('ru-status').innerHTML = '<div class="info-box red"><i class="fas fa-exclamation-circle"></i>Backend: ' + (r.error || 'Unknown') + '</div>';
-          return;
+      .withSuccessHandler(function(rd) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (rd && rd.success) {
+          _retailData.allRows = rd.rows || [];
+          _rebuildRetailKeyIndex();
         }
-        _retailData.parsed = r;
-        _retailStep = 2;
-        setTimeout(_renderRetailUpload, 300);
+        finishLocal();
       })
-      .withFailureHandler(function(err) {
-        _ruParsing = false;
-        document.getElementById('ru-status').innerHTML = '<div class="info-box red"><i class="fas fa-exclamation-circle"></i>Backend Error: ' + (err && err.message || 'Unknown') + '</div>';
+      .withFailureHandler(function() {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        // Fallback: use whatever cache we have
+        finishLocal();
       })
-      .checkRetailDuplicates(res.rows, res.dateRange, fileName);
+      .getRetailData();
   } catch (err) {
     _ruParsing = false;
+    _hideProcess();
     document.getElementById('ru-status').innerHTML = '<div class="info-box red"><i class="fas fa-exclamation-circle"></i>PDF Error: ' + (err && err.message || 'Unknown') + '</div>';
   }
 }
@@ -5288,8 +5491,11 @@ function _renderRU2(sc) {
 }
 
 function _ruCommit() {
+  if (window._ruCommitting) return; // hard block double-click
+  window._ruCommitting = true;
   var btn = document.getElementById('ru-commitBtn');
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Save ho raha hai...'; }
+  _showProcess('Sheet mein save ho raha hai...', 'Duplicates server pe bhi skip honge');
   var d = _retailData.parsed || {};
   var meta = {
     pdfFilename: d.pdfFilename || 'RETAIL SALE REGISTER',
@@ -5299,30 +5505,48 @@ function _ruCommit() {
     totalQty: (d.summary && d.summary.totalQty) || 0,
     totalAmount: (d.summary && d.summary.totalAmount) || 0
   };
-  // Attach dateRange onto each row so sheet stores it
   var rowsToSave = (d.newRows || []).map(function(r) {
     var copy = {};
     for (var k in r) if (Object.prototype.hasOwnProperty.call(r, k)) copy[k] = r[k];
     if (!copy.dateRange) copy.dateRange = meta.dateRange;
+    copy.Sale_Date = _ruNormDate(copy.Sale_Date || '');
     return copy;
   });
   google.script.run
     .withSuccessHandler(function(res) {
+      window._ruCommitting = false;
+      _hideProcess();
       if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Confirm & Save'; }
       if (res && res.success) {
         _retailData.result = res;
         _retailStep = 3;
-        // Force-clear cached rows so next retail view reloads from sheet
-        _retailData.allRows = [];
+        // Merge saved rows into local cache + key index (no empty-cache hole)
+        (d.newRows || []).forEach(function(r) {
+          var norm = _ruNormDate(r.Sale_Date || '');
+          var cust = String(r.Customer_Name || '').trim();
+          _retailData.allRows = _retailData.allRows || [];
+          _retailData.allRows.push({
+            saleDate: norm,
+            customer: cust,
+            qty: r.Qty || r.Qty_Summary || 0,
+            amount: r.Amount || r.Total_Amount || 0,
+            pending: r.Amount || r.Total_Amount || 0,
+            paid: 0
+          });
+          if (!_retailData.keyIndex) _retailData.keyIndex = {};
+          _retailData.keyIndex[norm + '||' + cust.toLowerCase()] = true;
+        });
+        _rebuildRetailKeyIndex();
         _renderRetailUpload();
-        // Also refresh retailCustomers list
         if (typeof _loadAllRetailCustomers === 'function') _loadAllRetailCustomers();
-        Swal.fire({ icon: 'success', title: 'Uploaded!', text: (res.written || 0) + ' entries save ho gayi!', timer: 2200, showConfirmButton: false });
+        _optimisticToast('✓ ' + (res.written || 0) + ' saved' + (res.skipped ? (', ' + res.skipped + ' dup skip') : ''));
       } else {
         Swal.fire('Error', (res && res.error) || 'Save failed', 'error');
       }
     })
     .withFailureHandler(function(e) {
+      window._ruCommitting = false;
+      _hideProcess();
       if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Confirm & Save'; }
       Swal.fire('Error', (e && e.message) || 'Network error', 'error');
     })
@@ -6318,17 +6542,24 @@ function _rptSubmit() {
     remarks: document.getElementById('rpt-remarks').value
   };
 
-  Swal.fire({ title: 'Recording...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+  _optimisticToast('✓ Recording payment…');
+  // Instant UI feedback
+  closeRPModal();
+  _rptResetRetailTab();
+
   google.script.run
     .withSuccessHandler(function(r) {
-      if (r.success) {
-        Swal.fire({ icon: 'success', title: 'Payment Recorded!', html: r.msg, timer: 2500, showConfirmButton: false });
-        _rptResetRetailTab();
-        _loadRetailCustomers();
-        // Refresh dashboard card
-        _refreshRetailOutstanding();
+      if (r && r.success) {
+        _optimisticToast('✓ ' + (r.msg || 'Payment recorded'));
+        // Soft refresh retail + payments
+        if (typeof _refreshRetailOutstanding === 'function') _refreshRetailOutstanding();
+        if (typeof _silentDataRefresh === 'function') _silentDataRefresh();
+        // Bust retail cache so pending amounts update
+        _retailData.allRows = [];
+        if (typeof renderRetailDashboard === 'function' && _activeView === 'retailDashboard') renderRetailDashboard();
+        if (typeof renderRetailSales === 'function' && _activeView === 'retailSales') renderRetailSales();
       } else {
-        Swal.fire('Error', r.error || 'Failed', 'error');
+        Swal.fire('Error', (r && r.error) || 'Failed', 'error');
       }
     })
     .withFailureHandler(function(e) {
@@ -6937,6 +7168,8 @@ function _renderRetailDashboardContent() {
       }).join('');
     }
   }
+
+  if (typeof _paintRetailDashboardFollowups === 'function') _paintRetailDashboardFollowups();
 
   // ── Recent Activity ──────────────────────────────────────
   _renderRetailRecentActivity();
@@ -7602,11 +7835,32 @@ function renderRetailEscalations() {
   }).join('');
 }
 
-/** Paint recent retail follow-ups on retail dashboard */
+/** Paint recent retail follow-ups + stats on retail dashboard */
 function _paintRetailDashboardFollowups() {
+  var all = (DB.followups || []).filter(_isRetailFollowUp);
+  var today = todayStr();
+  var todayCount = 0, openPromises = 0, overduePromises = 0, openEsc = 0;
+  var now = new Date(); now.setHours(0, 0, 0, 0);
+
+  all.forEach(function(f) {
+    if (isToday(f.datetime) || isToday(f.loggedOn)) todayCount++;
+    var kept = f.promiseKept || 'Pending';
+    if ((f.promiseAmt || f.promiseDate) && (kept === 'Pending' || !f.promiseKept)) {
+      openPromises++;
+      var pd = f.promiseDate ? parseIST(f.promiseDate) : null;
+      if (pd && pd < now) overduePromises++;
+    }
+    if (f.escalated === 'Yes' && kept !== 'Yes' && kept !== 'Kept') openEsc++;
+  });
+
+  txt('rd-fu-today', todayCount);
+  txt('rd-fu-promises', openPromises);
+  txt('rd-fu-overdue', overduePromises);
+  txt('rd-fu-esc', openEsc);
+
   var el = document.getElementById('rd-fu-list');
   if (!el) return;
-  var list = (DB.followups || []).filter(_isRetailFollowUp)
+  var list = all
     .sort(function(a, b) { return String(b.datetime || '').localeCompare(String(a.datetime || '')); })
     .slice(0, 8);
 
@@ -7633,3 +7887,287 @@ function _paintRetailDashboardFollowups() {
 window.renderRetailPromises = renderRetailPromises;
 window.renderRetailEscalations = renderRetailEscalations;
 window.setRPTFilter = setRPTFilter;
+
+
+// ── Clear ALL caches (client IndexedDB + server CacheService) & hard reload ──
+function clearAppCache() {
+  Swal.fire({
+    title: 'Clear cache?',
+    html: 'Local + server cache wipe hogi, sheet se <b>fresh</b> data aayega.<br><small style="color:#94A3B8">Internet chahiye · 5–10 sec</small>',
+    icon: 'warning',
+    showCancelButton: true,
+    confirmButtonText: 'Clear & Reload',
+    cancelButtonText: 'Cancel',
+    background: '#0F172A',
+    color: '#E2E8F0',
+    confirmButtonColor: '#EA4335'
+  }).then(function(res) {
+    if (!res.isConfirmed) return;
+    _forceFullRefresh(true);
+  });
+}
+window.clearAppCache = clearAppCache;
+
+/** True force refresh: bust server cache → reload main DB + retail register */
+function _forceFullRefresh(showToast) {
+  if (window._forceRefreshing) return;
+  window._forceRefreshing = true;
+  if (typeof _showProcess === 'function') _showProcess('Fresh data laa rahe hain...', 'Server cache clear + sheet read');
+  if (showToast) _optimisticToast('Clearing caches…');
+
+  try {
+    DB = null;
+    _retailData = { parsed: null, result: null, allRows: [], allLog: [], keyIndex: {} };
+    _lastUpdate = '0';
+  } catch (e) {}
+
+  var uname = (USER && USER.name) || URL_NAME || '';
+
+  function finish(ok, msg) {
+    window._forceRefreshing = false;
+    if (typeof _hideProcess === 'function') _hideProcess();
+    if (ok) _optimisticToast(msg || '✓ Fresh data loaded');
+    else Swal.fire('Error', msg || 'Refresh failed', 'error');
+  }
+
+  // 1) Bust server CacheService
+  google.script.run
+    .withSuccessHandler(function() {
+      // 2) Full getAllData with force
+      google.script.run
+        .withSuccessHandler(function(data) {
+          if (!data || !data.success) {
+            finish(false, (data && data.error) || 'Load failed');
+            return;
+          }
+          if (data.unchanged) {
+            // Should not happen with force — but handle
+          }
+          DB = data;
+          _lastUpdate = data.lastUpdate || String(Date.now());
+          if (_idb && _idb.set) _idb.set('mainDB', data);
+          _loadedOnce = true;
+          try {
+            _updateBadges();
+            _populateFilters();
+            _buildAllPartySS();
+          } catch (e) {}
+
+          // 3) Force retail register too
+          google.script.run
+            .withSuccessHandler(function(rd) {
+              if (rd && rd.success) {
+                _retailData.allRows = rd.rows || [];
+                if (typeof _rebuildRetailKeyIndex === 'function') _rebuildRetailKeyIndex();
+              }
+              try { _reRenderCurrent(); } catch (e) {}
+              if (typeof renderRetailDashboard === 'function' && _activeView === 'retailDashboard') renderRetailDashboard();
+              if (typeof renderRetailSales === 'function' && _activeView === 'retailSales') renderRetailSales();
+              finish(true, '✓ Synced with Google Sheet');
+            })
+            .withFailureHandler(function() {
+              try { _reRenderCurrent(); } catch (e) {}
+              finish(true, '✓ Main data loaded (retail retry later)');
+            })
+            .getRetailData(true); // force=true bypasses server cache
+        })
+        .withFailureHandler(function(e) {
+          finish(false, (e && e.message) || 'Network error');
+        })
+        .getAllData(uname, 'force');
+    })
+    .withFailureHandler(function() {
+      // Even if bust fails, still force getAllData
+      google.script.run
+        .withSuccessHandler(function(data) {
+          if (data && data.success) {
+            DB = data;
+            _lastUpdate = data.lastUpdate || '0';
+            if (_idb && _idb.set) _idb.set('mainDB', data);
+            _reRenderCurrent();
+            finish(true, '✓ Data reloaded');
+          } else finish(false, 'Reload failed');
+        })
+        .withFailureHandler(function(e) { finish(false, (e && e.message) || 'Network error'); })
+        .getAllData(uname, 'force');
+    })
+    .bustAllCaches();
+}
+window._forceFullRefresh = _forceFullRefresh;
+
+// Hook topbar Refresh to force path
+function doForceRefresh() {
+  _forceFullRefresh(true);
+}
+window.doForceRefresh = doForceRefresh;
+
+// ── Light polling: every 20s check if sheet changed (after onEdit trigger) ──
+var _pollTimer = null;
+function _startSheetPoll() {
+  if (_pollTimer) return;
+  _pollTimer = setInterval(function() {
+    if (document.hidden) return;
+    if (window._forceRefreshing || window._ruParsing || window._ruCommitting) return;
+    google.script.run
+      .withSuccessHandler(function(ts) {
+        if (!ts) return;
+        if (_lastUpdate && String(ts) !== String(_lastUpdate)) {
+          // Sheet changed elsewhere — soft silent refresh
+          var uname = (USER && USER.name) || URL_NAME || '';
+          google.script.run
+            .withSuccessHandler(function(data) {
+              if (!data || !data.success || data.unchanged) return;
+              DB = data;
+              _lastUpdate = data.lastUpdate || ts;
+              if (_idb && _idb.set) _idb.set('mainDB', data);
+              try {
+                _updateBadges();
+                _reRenderCurrent();
+              } catch (e) {}
+              _optimisticToast('↻ Sheet se update mila');
+              // retail too
+              google.script.run
+                .withSuccessHandler(function(rd) {
+                  if (rd && rd.success) {
+                    _retailData.allRows = rd.rows || [];
+                    if (typeof _rebuildRetailKeyIndex === 'function') _rebuildRetailKeyIndex();
+                    if (_activeView && String(_activeView).indexOf('retail') === 0) {
+                      try { _reRenderCurrent(); } catch (e) {}
+                    }
+                  }
+                })
+                .getRetailData(true);
+            })
+            .getAllData(uname, 'force');
+        }
+      })
+      .checkLastUpdate();
+  }, 20000);
+}
+window._startSheetPoll = _startSheetPoll;
+
+
+// ============================================================
+// GLOBAL PROCESS OVERLAY — prevents multi-click + shows status
+// ============================================================
+var _processLock = 0;
+
+function _showProcess(title, sub) {
+  _processLock++;
+  var el = document.getElementById('global-process');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'global-process';
+    el.innerHTML =
+      '<div class="gp-card">' +
+        '<div class="gp-spinner"></div>' +
+        '<div class="gp-title" id="gp-title">Working...</div>' +
+        '<div class="gp-sub" id="gp-sub"></div>' +
+        '<div class="gp-bar"><div class="gp-bar-fill"></div></div>' +
+      '</div>';
+    document.body.appendChild(el);
+  }
+  var t = document.getElementById('gp-title');
+  var s = document.getElementById('gp-sub');
+  if (t) t.textContent = title || 'Working...';
+  if (s) s.textContent = sub || '';
+  el.classList.add('show');
+  document.body.classList.add('gp-locked');
+}
+
+function _hideProcess() {
+  _processLock = Math.max(0, _processLock - 1);
+  if (_processLock > 0) return;
+  var el = document.getElementById('global-process');
+  if (el) el.classList.remove('show');
+  document.body.classList.remove('gp-locked');
+}
+
+function _withProcess(title, sub, fn) {
+  _showProcess(title, sub);
+  try {
+    var r = fn();
+    if (r && typeof r.then === 'function') {
+      return r.then(function(v) { _hideProcess(); return v; }, function(e) { _hideProcess(); throw e; });
+    }
+    _hideProcess();
+    return r;
+  } catch (e) {
+    _hideProcess();
+    throw e;
+  }
+}
+
+window._showProcess = _showProcess;
+window._hideProcess = _hideProcess;
+
+
+function renderRetailAging() {
+  var tbody = document.getElementById('ra-tbody');
+  if (!tbody) return;
+
+  function paint(rows) {
+    var today = new Date(); today.setHours(0,0,0,0);
+    var byCust = {};
+    var buckets = [0,0,0,0];
+    (rows || []).forEach(function(r) {
+      var pend = parseFloat(r.pending) || 0;
+      if (pend <= 0.01) return;
+      var d = parseIST(r.saleDate || r.Sale_Date || '');
+      var age = d ? Math.floor((today - d) / 86400000) : 0;
+      if (age < 0) age = 0;
+      var bi = age <= 7 ? 0 : age <= 15 ? 1 : age <= 30 ? 2 : 3;
+      buckets[bi] += pend;
+      var name = (r.customer || r.Customer_Name || '').trim() || 'Unknown';
+      if (!byCust[name]) byCust[name] = [0,0,0,0,0];
+      byCust[name][bi] += pend;
+      byCust[name][4] += pend;
+    });
+    txt('ra-b0', '₹' + _ruFmt(buckets[0]));
+    txt('ra-b1', '₹' + _ruFmt(buckets[1]));
+    txt('ra-b2', '₹' + _ruFmt(buckets[2]));
+    txt('ra-b3', '₹' + _ruFmt(buckets[3]));
+
+    var names = Object.keys(byCust).sort(function(a,b) { return byCust[b][4] - byCust[a][4]; });
+    if (!names.length) {
+      tbody.innerHTML = emptyRow(7, 'Koi pending outstanding nahi.');
+      return;
+    }
+    tbody.innerHTML = names.map(function(n) {
+      var b = byCust[n];
+      return '<tr>' +
+        '<td style="font-weight:600">' + escHTML(n) + '</td>' +
+        '<td class="num">' + (b[0] ? ('₹'+_ruFmt(b[0])) : '—') + '</td>' +
+        '<td class="num">' + (b[1] ? ('₹'+_ruFmt(b[1])) : '—') + '</td>' +
+        '<td class="num">' + (b[2] ? ('₹'+_ruFmt(b[2])) : '—') + '</td>' +
+        '<td class="num" style="color:var(--red);font-weight:700">' + (b[3] ? ('₹'+_ruFmt(b[3])) : '—') + '</td>' +
+        '<td class="num" style="font-weight:800">₹' + _ruFmt(b[4]) + '</td>' +
+        '<td style="white-space:nowrap">' +
+          '<button type="button" class="act-btn ab-pay" onclick="_rptQuickPay(\'' + escQ(n) + '\')"><i class="fas fa-indian-rupee-sign"></i></button> ' +
+          '<button type="button" class="act-btn ab-fu" onclick="openRetailFUModal(\'' + escQ(n) + '\')"><i class="fas fa-phone-alt"></i></button>' +
+        '</td></tr>';
+    }).join('');
+  }
+
+  if (_retailData.allRows && _retailData.allRows.length) {
+    paint(_retailData.allRows);
+  } else {
+    tbody.innerHTML = emptyRow(7, 'Loading...');
+    _showProcess('Aging load ho raha hai...', 'Retail register');
+    google.script.run
+      .withSuccessHandler(function(r) {
+        _hideProcess();
+        if (r && r.success) {
+          _retailData.allRows = r.rows || [];
+          _rebuildRetailKeyIndex();
+        }
+        paint(_retailData.allRows || []);
+      })
+      .withFailureHandler(function() {
+        _hideProcess();
+        tbody.innerHTML = emptyRow(7, 'Load failed');
+      })
+      .getRetailData();
+  }
+}
+window.renderRetailAging = renderRetailAging;
