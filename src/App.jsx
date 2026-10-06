@@ -15,6 +15,7 @@ import PromisesPage from './pages/PromisesPage'
 import RetailSalesPage from './pages/RetailSalesPage'
 import RetailPayPage from './pages/RetailPayPage'
 import TodaysDuePage from './pages/TodaysDuePage'
+import OverduePage from './pages/OverduePage'
 
 export default function App() {
   return (
@@ -32,6 +33,7 @@ export default function App() {
         >
           <Route index element={<SupplyDashboard />} />
           <Route path="todays-due" element={<TodaysDuePage />} />
+          <Route path="overdue" element={<OverduePage />} />
           <Route path="parties" element={<PartiesPage />} />
           <Route path="invoices" element={<InvoicesPage />} />
           <Route path="payments" element={<PaymentsListPage />} />
