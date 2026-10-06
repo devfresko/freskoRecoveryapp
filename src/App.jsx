@@ -31,6 +31,7 @@ export default function App() {
           }
         >
           <Route index element={<SupplyDashboard />} />
+          <Route path="todays-due" element={<TodaysDuePage />} />
           <Route path="parties" element={<PartiesPage />} />
           <Route path="invoices" element={<InvoicesPage />} />
           <Route path="payments" element={<PaymentsListPage />} />
