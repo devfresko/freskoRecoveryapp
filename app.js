@@ -5539,6 +5539,17 @@ function _ruCommit() {
         _rebuildRetailKeyIndex();
         _renderRetailUpload();
         if (typeof _loadAllRetailCustomers === 'function') _loadAllRetailCustomers();
+        // Pull the real register from the server in background so Dashboard / Register / Aging are correct immediately
+        google.script.run
+          .withSuccessHandler(function (rd) {
+            if (rd && rd.success) {
+              _retailData.allRows = rd.rows || [];
+              _rebuildRetailKeyIndex();
+              try { _refreshRetailOutstanding(); } catch (e) {}
+              try { _refreshRetailViews(); } catch (e) {}
+            }
+          })
+          .getRetailData(true);
         _optimisticToast('✓ ' + (res.written || 0) + ' saved' + (res.skipped ? (', ' + res.skipped + ' dup skip') : ''));
       } else {
         Swal.fire('Error', (res && res.error) || 'Save failed', 'error');
@@ -7915,12 +7926,8 @@ function _forceFullRefresh(showToast) {
   if (typeof _showProcess === 'function') _showProcess('Fresh data laa rahe hain...', 'Server cache clear + sheet read');
   if (showToast) _optimisticToast('Clearing caches…');
 
-  try {
-    DB = null;
-    _retailData = { parsed: null, result: null, allRows: [], allLog: [], keyIndex: {} };
-    _lastUpdate = '0';
-  } catch (e) {}
-
+  // NOTE: old data is kept on screen until fresh data arrives. If the server is slow or
+  // fails, staff still see their last data instead of an empty ₹0 dashboard.
   var uname = (USER && USER.name) || URL_NAME || '';
 
   function finish(ok, msg) {
@@ -7934,6 +7941,7 @@ function _forceFullRefresh(showToast) {
   google.script.run
     .withSuccessHandler(function() {
       // 2) Full getAllData with force
+      if (window.__chunkProgress) window.__chunkProgress('Main data load ho raha hai... (1/2)');
       google.script.run
         .withSuccessHandler(function(data) {
           if (!data || !data.success) {
@@ -7954,6 +7962,7 @@ function _forceFullRefresh(showToast) {
           } catch (e) {}
 
           // 3) Force retail register too
+          if (window.__chunkProgress) window.__chunkProgress('Retail register load ho raha hai... (2/2)');
           google.script.run
             .withSuccessHandler(function(rd) {
               if (rd && rd.success) {
