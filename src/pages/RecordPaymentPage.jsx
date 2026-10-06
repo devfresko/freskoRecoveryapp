@@ -79,73 +79,76 @@ export default function RecordPaymentPage() {
           setAmount('')
           setRefNo('')
           setRemarks('')
-          navigate('/invoices')
+          navigate('/payments')
         }
       },
     })
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="mx-auto max-w-2xl space-y-4">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Record Payment</h1>
-        <p className="text-sm text-slate-500">
-          FIFO allocation on device · UI updates instantly · sheet syncs in background
-        </p>
+        <p className="text-sm text-slate-500">FIFO allocation · oldest invoices first</p>
       </div>
 
-      <form onSubmit={onSubmit} className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <form onSubmit={onSubmit} className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+        {/* Party */}
         <div>
           <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Party</label>
           <select
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+            className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand"
             value={partyId}
             onChange={(e) => setPartyId(e.target.value)}
             required
           >
-            <option value="">Select party…</option>
-            {(parties || [])
-              .slice()
-              .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-              .map((p) => (
-                <option key={p.partyID} value={p.partyID}>
-                  {p.name}
-                </option>
-              ))}
+            <option value="">Select party</option>
+            {(parties || []).map((p) => (
+              <option key={p.partyID} value={p.partyID}>
+                {p.name} {p.partyCode ? `(${p.partyCode})` : ''}
+              </option>
+            ))}
           </select>
           {party && (
             <p className="mt-1 text-xs text-slate-500">
-              Open invoices: {openInvs.length} · Pending {inrFull(totalPending)}
+              Open invoices: {openInvs.length} · Pending: <span className="font-semibold text-rose-600">{inr(totalPending)}</span>
             </p>
           )}
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        {/* Amount + Date */}
+        <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Amount (₹)</label>
+            <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Amount</label>
             <input
               type="number"
-              min="0"
+              min="1"
               step="0.01"
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
+              placeholder="0"
               required
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Date</label>
+            <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment Date</label>
             <input
               type="date"
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand"
               value={payDate}
               onChange={(e) => setPayDate(e.target.value)}
+              required
             />
           </div>
+        </div>
+
+        {/* Mode + Ref */}
+        <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Mode</label>
             <select
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm"
               value={mode}
               onChange={(e) => setMode(e.target.value)}
             >
@@ -157,25 +160,26 @@ export default function RecordPaymentPage() {
           <div>
             <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Ref No</label>
             <input
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand"
               value={refNo}
               onChange={(e) => setRefNo(e.target.value)}
             />
           </div>
         </div>
 
+        {/* Remarks */}
         <div>
           <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Remarks</label>
           <input
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+            className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand"
             value={remarks}
             onChange={(e) => setRemarks(e.target.value)}
           />
         </div>
 
-        {/* FIFO preview */}
-        <div className="rounded-lg border border-violet-100 bg-violet-50/50 p-3">
-          <div className="mb-2 flex justify-between text-sm font-semibold text-violet-900">
+        {/* FIFO Preview */}
+        <div className="rounded-lg border border-brand/20 bg-brand/5 p-3">
+          <div className="mb-2 flex flex-wrap justify-between gap-2 text-sm font-semibold text-brand-dark">
             <span>FIFO allocation preview</span>
             <span>
               Applied {inr(plan.totalApplied)}
@@ -185,11 +189,16 @@ export default function RecordPaymentPage() {
             </span>
           </div>
           {!plan.allocations.length ? (
-            <p className="text-xs text-slate-500">Party + amount choose karo — oldest dues pehle clear hongi.</p>
+            <p className="text-xs text-slate-500">
+              Party + amount choose karo — oldest dues pehle clear hongi.
+            </p>
           ) : (
             <ul className="max-h-40 space-y-1 overflow-auto text-xs">
               {plan.allocations.map((a) => (
-                <li key={a.invoiceNo} className="flex justify-between gap-2 border-b border-violet-100/80 py-1">
+                <li
+                  key={a.invoiceNo}
+                  className="flex justify-between gap-2 border-b border-brand/10 py-1.5"
+                >
                   <span className="font-mono">{a.invoiceNo}</span>
                   <span>
                     {inrFull(a.amount)}{' '}
@@ -206,9 +215,9 @@ export default function RecordPaymentPage() {
         <button
           type="submit"
           disabled={!party || !plan.allocations.length || mutation.isPending}
-          className="w-full rounded-lg bg-violet-600 py-2.5 text-sm font-bold text-white hover:bg-violet-700 disabled:opacity-50"
+          className="w-full rounded-lg bg-brand py-3 text-sm font-bold text-white hover:bg-brand-dark disabled:opacity-50"
         >
-          Save Payment (instant UI)
+          {mutation.isPending ? 'Saving…' : 'Save Payment'}
         </button>
       </form>
     </div>
