@@ -16,7 +16,11 @@ export default function SupplyDashboard() {
             <div key={i} className="h-28 animate-pulse rounded-xl bg-slate-200" />
           ))}
         </div>
-        <div className="h-72 animate-pulse rounded-xl bg-slate-200" />
+        <div className="h-64 animate-pulse rounded-xl bg-slate-200" />
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="h-64 animate-pulse rounded-xl bg-slate-200" />
+          <div className="h-64 animate-pulse rounded-xl bg-slate-200" />
+        </div>
       </div>
     )
   }
@@ -36,9 +40,14 @@ export default function SupplyDashboard() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Supply Dashboard</h1>
-        <p className="text-sm text-slate-500">Payment follow-up overview</p>
+        <p className="text-sm text-slate-500">Payment follow-up overview · same data as old app</p>
       </div>
-      <SupplyMetrics stats={data?.stats} invoices={data?.invoices} />
+      <SupplyMetrics
+        stats={data?.stats}
+        invoices={data?.invoices}
+        followups={data?.followups}
+        parties={data?.parties}
+      />
     </div>
   )
 }
