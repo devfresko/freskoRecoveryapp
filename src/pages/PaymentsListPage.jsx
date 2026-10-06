@@ -22,14 +22,16 @@ export default function PaymentsListPage() {
       .slice(0, 200)
   }, [payments, q])
 
-  if (isLoading) return <div className="h-40 animate-pulse rounded-xl bg-slate-200" />
+  if (isLoading) {
+    return <div className="h-40 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-800" />
+  }
 
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Payments</h1>
-          <p className="text-sm text-slate-500">{list.length} shown</p>
+          <h1 className="text-2xl font-bold">Payments</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400">{list.length} shown</p>
         </div>
         <Link
           to="/payments/new"
@@ -40,22 +42,24 @@ export default function PaymentsListPage() {
       </div>
 
       <input
-        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand sm:w-64"
+        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand dark:border-slate-700 dark:bg-slate-900 sm:w-64"
         placeholder="Search party / ref…"
         value={q}
         onChange={(e) => setQ(e.target.value)}
       />
 
-      {/* Mobile */}
       <div className="space-y-3 md:hidden">
         {list.map((p) => (
-          <div key={p.paymentID} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div
+            key={p.paymentID}
+            className="card-pop rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900"
+          >
             <div className="flex justify-between gap-2">
-              <div className="font-semibold text-slate-800">
+              <div className="font-semibold">
                 {p.partyName}
                 {p._optimistic && <span className="ml-1 text-xs text-brand">…</span>}
               </div>
-              <div className="font-bold text-emerald-700">{inr(p.amount)}</div>
+              <div className="font-bold text-emerald-600 dark:text-emerald-400">{inr(p.amount)}</div>
             </div>
             <div className="mt-1 text-xs text-slate-500">
               {p.paymentDate} · {p.mode} · {p.paymentType || 'Invoice'}
@@ -65,10 +69,9 @@ export default function PaymentsListPage() {
         {!list.length && <div className="py-10 text-center text-slate-400">No payments</div>}
       </div>
 
-      {/* Desktop */}
-      <div className="hidden overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm md:block">
+      <div className="hidden overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900 md:block">
         <table className="w-full text-left text-sm">
-          <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+          <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
             <tr>
               <th className="px-4 py-3">Date</th>
               <th className="px-4 py-3">Party</th>
@@ -79,14 +82,17 @@ export default function PaymentsListPage() {
           </thead>
           <tbody>
             {list.map((p) => (
-              <tr key={p.paymentID} className="border-t border-slate-100 hover:bg-slate-50/80">
+              <tr
+                key={p.paymentID}
+                className="border-t border-slate-100 hover:bg-slate-50/80 dark:border-slate-800 dark:hover:bg-slate-800/50"
+              >
                 <td className="px-4 py-3 text-slate-500">{p.paymentDate}</td>
                 <td className="px-4 py-3 font-medium">
                   {p.partyName}
                   {p._optimistic && <span className="ml-1 text-xs text-brand">…</span>}
                 </td>
                 <td className="px-4 py-3">{p.mode}</td>
-                <td className="px-4 py-3 text-right font-semibold text-emerald-700">
+                <td className="px-4 py-3 text-right font-semibold text-emerald-600 dark:text-emerald-400">
                   {inr(p.amount)}
                 </td>
                 <td className="px-4 py-3 text-xs text-slate-500">{p.paymentType || 'Invoice'}</td>
