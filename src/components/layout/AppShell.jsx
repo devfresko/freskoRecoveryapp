@@ -9,7 +9,7 @@ const sections = [
   items: [
     { to: '/', label: 'Dashboard', end: true },
     { to: '/todays-due', label: "Today's Due" },
-    { to: '/invoices?status=Overdue', label: 'Overdue' },
+    { to: '/overdue', label: 'Overdue' },
   ],
 },
   {
