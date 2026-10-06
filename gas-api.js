@@ -1,4 +1,3 @@
-
 // ============================================================
 // gas-api.js — JSONP bridge to the Fresko Apps Script backend
 // ============================================================
@@ -17,7 +16,7 @@
 // Web App URL (Sheet menu → "Payment Follow-up" → "Show API URL (for app.js)").
 // ============================================================
 
-var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz5IAbcgCFE2JvXpvc_BacKmbNCRBVQsfFnZ9kuMixNcJFv2V1exBxELWtwItVpOk6t/exec';
+var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxd46wKvk1uoTnPtt7e-cL0_hUsJEjr_KOWDwJjn9Z6pszxK5d4aqYDpxVy6kUjpEm4/exec';
 
 (function () {
   var _cbIdx = 0;
@@ -25,6 +24,18 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz5IAbcgCFE2JvXpvc_Ba
   // Keep each JSONP request's query string comfortably under safe URL-length
   // limits. Only matters for calls with big array payloads (bulk upload).
   var MAX_ARGS_JSON_LEN = 6000;
+
+  // Auto-retry is ONLY safe for read-only / idempotent calls. Retrying a write such
+  // as recordPayment / createInvoice / saveFollowUp / sendWhatsApp* after a timeout can
+  // execute it twice on the server (duplicate payment, duplicate message).
+  var RETRY_SAFE = {
+    loginUser:1, getAllData:1, getRetailData:1, checkLastUpdate:1, getAnalytics:1, getAppUrl:1,
+    bustAllCaches:1, getRetailCustomersWithPending:1, getRetailEntriesForCustomer:1,
+    getRetailOutstandingSummary:1, getRetailCustomers:1, previewRecalcPartyInvoices:1,
+    checkRetailDuplicates:1,
+    commitRetailData:1,      // duplicates skipped server-side
+    bulkUploadInvoices:1     // duplicate invoice nos skipped server-side
+  };
 
   function _rawJsonpCall(fnName, args, onSuccess, onFailure, _attempt) {
     var attempt = _attempt || 1;
@@ -42,11 +53,14 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz5IAbcgCFE2JvXpvc_Ba
     function fail(err) {
       cleanup();
       // Auto-retry on network/timeout (Apps Script cold start is common)
-      if (attempt < maxAttempts) {
+      if (attempt < maxAttempts && RETRY_SAFE[fnName]) {
         setTimeout(function () {
           _rawJsonpCall(fnName, args, onSuccess, onFailure, attempt + 1);
         }, 600 * attempt);
         return;
+      }
+      if (!RETRY_SAFE[fnName] && err && err.message) {
+        err.message += ' — Pehle check kar lo ki entry save hui ya nahi (Refresh dabao), phir hi dobara karo.';
       }
       if (onFailure) onFailure(err);
     }
