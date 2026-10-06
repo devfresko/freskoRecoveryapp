@@ -8053,7 +8053,7 @@ window._startSheetPoll = _startSheetPoll;
 var _processLock = 0;
 
 function _showProcess(title, sub) {
-  _processLock++;
+  _processLock = 1; // boolean, NOT a counter: nested/repeated show calls must never leave the UI locked
   var el = document.getElementById('global-process');
   if (!el) {
     el = document.createElement('div');
@@ -8076,8 +8076,7 @@ function _showProcess(title, sub) {
 }
 
 function _hideProcess() {
-  _processLock = Math.max(0, _processLock - 1);
-  if (_processLock > 0) return;
+  _processLock = 0;
   var el = document.getElementById('global-process');
   if (el) el.classList.remove('show');
   document.body.classList.remove('gp-locked');
@@ -8100,6 +8099,11 @@ function _withProcess(title, sub, fn) {
 
 window._showProcess = _showProcess;
 window._hideProcess = _hideProcess;
+// Live progress text for chunked uploads (called from gas-api.js)
+window.__chunkProgress = function (text) {
+  var s = document.getElementById('gp-sub');
+  if (s && text) s.textContent = text;
+};
 
 
 function renderRetailAging() {
