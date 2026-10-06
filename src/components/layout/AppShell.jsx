@@ -5,13 +5,13 @@ import { cn } from '../../lib/utils'
 
 const sections = [
   {
-    label: 'Overview',
-    items: [
-      { to: '/', label: 'Dashboard', end: true },
-      { to: '/invoices?status=Overdue', label: 'Overdue' },
-      { to: '/invoices?status=Pending', label: "Today's Due" },
-    ],
-  },
+  label: 'Overview',
+  items: [
+    { to: '/', label: 'Dashboard', end: true },
+    { to: '/todays-due', label: "Today's Due" },
+    { to: '/invoices?status=Overdue', label: 'Overdue' },
+  ],
+},
   {
     label: 'Parties',
     items: [
