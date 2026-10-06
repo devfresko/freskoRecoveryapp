@@ -148,6 +148,7 @@ var _idb = (function() {
           } catch(e) {}
         }
         _modeInitialized = true;
+        _showSplash();
 
         document.getElementById('login-wrapper').style.display = 'none';
         document.getElementById('app-wrapper').style.display = 'flex';
@@ -282,6 +283,7 @@ window.onload = function () {
     DB = cached;
     _lastUpdate = cached.lastUpdate || '0';
     document.getElementById('loader').style.display = 'none';
+    _hideSplash();
     _applyPermissions();
     _populateFilters();
     _buildAllPartySS();
@@ -316,6 +318,7 @@ function _initialNetworkLoad() {
   var uname = (_user && _user.name) || URL_NAME || '';
   if (!uname) {
     // No user → show login
+    _hideSplash();
     document.getElementById('loader').style.display = 'none';
     document.getElementById('app-wrapper').style.display = 'none';
     document.getElementById('login-wrapper').style.display = 'flex';
@@ -369,6 +372,7 @@ function _onDataLoaded(data) {
   if (!data || !data.success) { _onFail({ message: data ? data.error : 'Load failed' }); return; }
   DB = data;
   document.getElementById('loader').style.display = 'none';
+  _hideSplash();
 
   if (data.userInfo && data.userInfo.foundInDB) {
     USER = Object.assign(USER, data.userInfo);
@@ -396,6 +400,7 @@ function _onDataLoaded(data) {
 
      
       function _onFail(err) {
+        _hideSplash();
         document.getElementById('loader').innerHTML =
           `<div style="text-align:center;padding:24px">
       <i class="fas fa-exclamation-circle" style="font-size:32px;color:var(--red);margin-bottom:12px;display:block"></i>
@@ -657,6 +662,13 @@ function _renderIncremental(tbody, allRows, renderRowFn, batchSize) {
 var _tabRenderCache = {};
 
 function nav(v) {
+  // ── Mode guard: Supply views only in Supply mode, Retail views only in Retail mode ──
+  try {
+    var _rv = RETAIL_NAV_ITEMS.map(function(x) { return x.replace('nav-', ''); });
+    var _sv = SUPPLY_NAV_ITEMS.map(function(x) { return x.replace('nav-', ''); });
+    if (_activeMode === 'supply' && _rv.indexOf(v) >= 0) v = SUPPLY_HOME_VIEW;
+    else if (_activeMode === 'retail' && _sv.indexOf(v) >= 0) v = RETAIL_HOME_VIEW;
+  } catch (e) {}
   // ── Mobile: close the sidebar drawer automatically ───────
   if (window.innerWidth <= 768) {
     var sbEl = document.getElementById('sb');
@@ -1371,8 +1383,8 @@ function nav(v) {
         const el = document.getElementById('dash-fu-list');
         const ts = todayStr();
         const list = _fuTab === 'today'
-          ? (DB.followups || []).filter(f => isToday(f.datetime)).reverse()
-          : [...(DB.followups || [])].reverse().slice(0, 12);
+          ? _supplyFUs().filter(f => isToday(f.datetime)).reverse()
+          : [..._supplyFUs()].reverse().slice(0, 12);
 
         if (!list.length) {
           el.innerHTML = `<div class="empty"><i class="fas fa-calendar-check"></i><p>${_fuTab === 'today' ? 'No follow-ups today' : 'No follow-ups logged'}</p><small><button style="color:var(--red);font-weight:600;background:none;border:none;cursor:pointer;font-size:11px" onclick="openFUModal()">+ Log one now</button></small></div>`;
@@ -1403,7 +1415,7 @@ function nav(v) {
 
         const dueToday = (DB.invoices || []).filter(i => !isPaid(i) && i.dueDate === ts);
         const overdueAll = (DB.invoices || []).filter(i => !isPaid(i) && daysOD(i) > 0);
-        const fuToday = (DB.followups || []).filter(f => isToday(f.datetime));
+        const fuToday = _supplyFUs().filter(f => isToday(f.datetime));
 
         const dtAmt = dueToday.reduce((s, i) => s + pending(i), 0);
         const odAmt = overdueAll.reduce((s, i) => s + pending(i), 0);
@@ -1476,7 +1488,7 @@ function nav(v) {
         txt('od-b1', INR(b1)); txt('od-b2', INR(b2)); txt('od-b3', INR(b3)); txt('od-b4', INR(b4)); txt('od-b5', INR(b5));
 
         const lastFU = {};
-        (DB.followups || []).forEach(f => {
+        _supplyFUs().forEach(f => {
           if (!lastFU[f.partyID] || f.datetime > lastFU[f.partyID].datetime)
             lastFU[f.partyID] = f;
         });
@@ -2923,7 +2935,7 @@ function shortPage(d) {
         window._fuOutstandingAmt = 0;
         // Reset all FU form fields
         ['fu-notes','fu-contact','fu-promise-amt','fu-attach','fu-party-id','fu-party-code','fu-party-name',
-         'fu-promise-date','fu-next-date','fu-next'].forEach(id => { const e = document.getElementById(id); if(e) e.value=''; });
+         'fu-promise-date','fu-next-date','fu-next-action'].forEach(id => { const e = document.getElementById(id); if(e) e.value=''; });
         const mi = document.getElementById('fu-mode-inp'); if(mi) mi.value='Phone Call';
         const pr = document.getElementById('fu-priority'); if(pr) pr.value='Medium';
         const es = document.getElementById('fu-escalated'); if(es) es.value='No';
@@ -3023,7 +3035,7 @@ function shortPage(d) {
           promiseAmt: parseFloat(document.getElementById('fu-promise-amt').value) || 0,
           promiseDate: fmtDate(document.getElementById('fu-promise-date').value),
           promiseKept: 'Pending',
-          nextAction: document.getElementById('fu-next').value,
+          nextAction: document.getElementById('fu-next-action').value,
           nextActionDate: fmtDate(document.getElementById('fu-next-date').value),
           priority: document.getElementById('fu-priority').value,
           escalated: document.getElementById('fu-escalated').value,
@@ -3949,7 +3961,7 @@ function shortPage(d) {
         const modeF = (document.getElementById('fu-mode-filter') || {}).value || '';
 
         let list = (DB.followups || []).filter(f => {
-          if (f.partyID === 'RETAIL' || f.partyCode === 'RETAIL') return false; // retail FUs have own view
+          if (_isRetailFollowUp(f)) return false; // retail FUs have own view
           if (q && !((f.partyName||'').toLowerCase().includes(q) || (f.notes||'').toLowerCase().includes(q) || (f.invoiceNo||'').toLowerCase().includes(q))) return false;
           if (modeF && f.mode !== modeF) return false;
           if (from || to) {
@@ -4018,7 +4030,7 @@ function shortPage(d) {
 
         const ptFrom = (document.getElementById('pt-from')||{}).value||'';
         const ptTo   = (document.getElementById('pt-to')||{}).value||'';
-        let list = (DB.followups || []).filter(f => {
+        let list = _supplyFUs().filter(f => {
           if (!f.promiseAmt && !f.promiseDate) return false;
           if (ptFrom || ptTo) {
             const fd = parseIST((f.datetime||'').split(' ')[0]);
@@ -4202,8 +4214,8 @@ function shortPage(d) {
         const escFrom  = (document.getElementById('esc-from')||{}).value||'';
         const escTo    = (document.getElementById('esc-to')||{}).value||'';
         const escSearch= ((document.getElementById('esc-search')||{}).value||'').toLowerCase();
-        const list = (DB.followups || []).filter(f => {
-          if (f.partyID === 'RETAIL' || f.partyCode === 'RETAIL') return false;
+        const list = _supplyFUs().filter(f => {
+          if (_isRetailFollowUp(f)) return false;
           if (f.escalated !== 'Yes') return false;
           if (escSearch && !f.partyName.toLowerCase().includes(escSearch)) return false;
           if (escFrom || escTo) {
@@ -8184,3 +8196,295 @@ function renderRetailAging() {
   }
 }
 window.renderRetailAging = renderRetailAging;
+
+
+// ============================================================
+// SUPPLY / RETAIL ISOLATION HELPER
+// ============================================================
+function _supplyFUs() {
+  return (DB.followups || []).filter(function (f) { return !_isRetailFollowUp(f); });
+}
+
+// ============================================================
+// PREMIUM SPLASH LOADER (login ke baad blank screen ki jagah)
+// ============================================================
+var _splashShownAt = 0;
+function _showSplash() {
+  var el = document.getElementById('app-splash');
+  if (!el) return;
+  _splashShownAt = Date.now();
+  el.classList.remove('hide');
+  el.classList.add('show');
+}
+function _hideSplash() {
+  var el = document.getElementById('app-splash');
+  if (!el || !el.classList.contains('show')) return;
+  // minimum 700ms dikhao taaki flicker na ho
+  var wait = Math.max(0, 700 - (Date.now() - (_splashShownAt || 0)));
+  setTimeout(function () {
+    el.classList.add('hide');
+    setTimeout(function () { el.classList.remove('show'); el.classList.remove('hide'); }, 500);
+  }, wait);
+}
+// safety net: koi bhi error ho, 25s baad splash hat jaye
+setTimeout(function () { try { _hideSplash(); } catch (e) {} }, 25000);
+
+// ============================================================
+// FOLLOW-UP ACTION BOARD
+// Rule: kisi party/customer ka LATEST follow-up uska "current status" hai.
+//  - Latest me Next Action Date (ya pending promise date) hai  => OPEN (kaam baaki)
+//  - Latest me koi date nahi                                  => CLOSED
+// Client "baad me baat karenge" bole => naya follow-up nayi date ke saath = chain aage badhti hai.
+// ============================================================
+function _fuTime(f) {
+  var d = parseIST(f.datetime) || parseIST(String(f.datetime || '').split(' ')[0]);
+  return d ? d.getTime() : 0;
+}
+function _fuKeyOf(f) {
+  return _isRetailFollowUp(f)
+    ? 'R::' + String(f.partyName || '').trim().toLowerCase()
+    : 'S::' + String(f.partyID || '');
+}
+function _fuDayStart(d) { var x = new Date(d.getTime()); x.setHours(0, 0, 0, 0); return x; }
+
+function _fuBuildChains(retail) {
+  var list = (DB.followups || []).filter(function (f) { return retail ? _isRetailFollowUp(f) : !_isRetailFollowUp(f); });
+  var groups = {};
+  list.forEach(function (f) { var k = _fuKeyOf(f); (groups[k] = groups[k] || []).push(f); });
+  var today = _fuDayStart(new Date());
+  var out = [];
+  Object.keys(groups).forEach(function (k) {
+    var arr = groups[k].sort(function (a, b) { return _fuTime(a) - _fuTime(b); });
+    var last = arr[arr.length - 1];
+    var due = null, dueWhy = '';
+    var nd = last.nextActionDate ? parseIST(last.nextActionDate) : null;
+    if (nd) { due = nd; dueWhy = 'Next action'; }
+    var pk = String(last.promiseKept || 'Pending');
+    var pd = last.promiseDate ? parseIST(last.promiseDate) : null;
+    if (pd && (pk === 'Pending' || pk === '') && (!due || pd < due)) { due = pd; dueWhy = 'Promise'; }
+    if (!due) return; // closed
+    var outstanding = null;
+    if (retail) {
+      if (_retailData && _retailData.allRows && _retailData.allRows.length) outstanding = _retailCustomerPending(last.partyName);
+    } else {
+      outstanding = (DB.invoices || []).filter(function (i) { return i.partyID === last.partyID && !isPaid(i); })
+        .reduce(function (s, i) { return s + pending(i); }, 0);
+    }
+    if (outstanding !== null && outstanding <= 0) return; // paisa mil chuka — kaam khatam
+    var days = Math.round((_fuDayStart(due) - today) / 86400000);
+    out.push({ key: k, retail: retail, partyID: last.partyID, name: last.partyName || '', last: last, count: arr.length,
+      due: due, dueWhy: dueWhy, days: days, outstanding: outstanding });
+  });
+  out.sort(function (a, b) { return a.days - b.days; });
+  return out;
+}
+
+function _fuChip(c) {
+  if (c.days < 0) return '<span style="background:#FCE8E6;color:#C5221F;font-weight:700;font-size:10px;padding:2px 8px;border-radius:10px">' + Math.abs(c.days) + ' din late</span>';
+  if (c.days === 0) return '<span style="background:#FEF7E0;color:#B06000;font-weight:700;font-size:10px;padding:2px 8px;border-radius:10px">Aaj</span>';
+  return '<span style="background:#E8F0FE;color:#1967D2;font-weight:700;font-size:10px;padding:2px 8px;border-radius:10px">' + c.days + ' din me</span>';
+}
+
+function renderFUBoard(retail) {
+  var wrap = document.getElementById(retail ? 'rfu-board-wrap' : 'fu-board-wrap');
+  if (!wrap) return;
+  var chains = _fuBuildChains(retail);
+  var od = chains.filter(function (c) { return c.days < 0; }).length;
+  var td = chains.filter(function (c) { return c.days === 0; }).length;
+  var up = chains.length - od - td;
+  var accent = retail ? '#7C3AED' : '#005F73';
+  var head = '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border)">' +
+    '<div style="font-weight:800;font-size:14px"><i class="fas fa-tasks" style="color:' + accent + ';margin-right:8px"></i>Action Board — kiska kaam baaki hai</div>' +
+    '<div style="display:flex;gap:6px;font-size:11px;font-weight:700">' +
+    '<span style="background:#FCE8E6;color:#C5221F;padding:3px 10px;border-radius:10px">Late ' + od + '</span>' +
+    '<span style="background:#FEF7E0;color:#B06000;padding:3px 10px;border-radius:10px">Aaj ' + td + '</span>' +
+    '<span style="background:#E8F0FE;color:#1967D2;padding:3px 10px;border-radius:10px">Aage ' + up + '</span></div></div>';
+  var body;
+  if (!chains.length) {
+    body = '<div style="text-align:center;padding:22px;color:var(--muted);font-size:12px"><i class="fas fa-check-circle" style="color:var(--green);font-size:22px;display:block;margin-bottom:6px"></i>Koi follow-up pending nahi. Naya follow-up me "Next Action Date" daaloge to yahan track hoga.</div>';
+  } else {
+    body = '<div style="max-height:380px;overflow-y:auto">' + chains.map(function (c) {
+      var l = c.last, k = escQ(c.retail ? c.name : c.partyID);
+      var notes = String(l.notes || '');
+      if (notes.length > 90) notes = notes.slice(0, 90) + '…';
+      return '<div style="display:flex;gap:12px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;padding:11px 16px;border-bottom:1px solid #F1F5F9">' +
+        '<div style="flex:1;min-width:230px">' +
+          '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="font-weight:700;font-size:13px">' + escHTML(c.name) + '</span>' + _fuChip(c) +
+          (c.outstanding !== null ? '<span style="font-size:11px;color:var(--red);font-weight:700">₹' + (retail ? _ruFmt(c.outstanding) : Math.round(c.outstanding).toLocaleString('en-IN')) + ' baaki</span>' : '') + '</div>' +
+          '<div style="font-size:11px;color:var(--muted);margin-top:4px"><b>Pichhli baat</b> (' + escHTML(String(l.datetime || '').split(' ')[0]) + ', ' + escHTML(l.mode || '') + '): ' + escHTML(notes || '-') + '</div>' +
+          '<div style="font-size:11px;margin-top:3px"><b style="color:' + accent + '">' + escHTML(c.dueWhy === 'Promise' ? 'Promise' : 'Plan') + ':</b> ' +
+            escHTML((c.dueWhy === 'Promise' ? ('₹' + _ruFmt(l.promiseAmt || 0) + ' dene ka wada') : (l.nextAction || 'Follow-up')) ) + ' · ' + escHTML(fmtLocalDate(c.due)) +
+            ' <span style="color:var(--muted)">· ' + c.count + ' baar baat ho chuki' + (c.count >= 3 ? ' ⚠' : '') + '</span></div>' +
+        '</div>' +
+        '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+          '<button class="btn btn-sm btn-amber" onclick="_fuBoardOutcome(\'' + k + '\',' + (retail ? 'true' : 'false') + ')"><i class="fas fa-pen"></i> Outcome likho</button>' +
+          '<button class="btn btn-sm btn-ghost" onclick="_fuBoardDefer(\'' + escQ(c.key) + '\',' + (retail ? 'true' : 'false') + ')" title="Client ne baad me baat karne ko kaha"><i class="fas fa-clock"></i> Taal diya</button>' +
+          '<button class="btn btn-sm btn-ghost" onclick="_fuBoardClose(\'' + escQ(c.key) + '\',' + (retail ? 'true' : 'false') + ')" title="Kaam ho gaya / band karo"><i class="fas fa-check"></i> Band</button>' +
+        '</div></div>';
+    }).join('') + '</div>';
+  }
+  wrap.innerHTML = '<div class="card" style="margin-bottom:16px;border-left:3px solid ' + accent + '">' + head + body + '</div>';
+}
+
+function _fuFindChain(key, retail) {
+  var c = _fuBuildChains(retail).filter(function (x) { return x.key === key; })[0];
+  return c || null;
+}
+
+// "Outcome likho" — modal party ke saath khulta hai aur pichhla plan upar dikhta hai
+function _fuBoardOutcome(id, retail) {
+  if (retail) openRetailFUModal(id);
+  else openFUModalForParty(id);
+}
+
+// Quick log: modal ke bina ek follow-up entry (defer / close)
+function _fuQuickLog(chain, notes, nextDateISO, nextAction) {
+  var l = chain.last;
+  var party = chain.retail ? null : (DB.parties || []).filter(function (p) { return p.partyID === l.partyID; })[0];
+  var data = {
+    partyID: chain.retail ? 'RETAIL' : l.partyID,
+    partyCode: chain.retail ? 'RETAIL' : (l.partyCode || (party && party.partyCode) || ''),
+    partyName: l.partyName,
+    datetime: fmtLocalDateTime(new Date()),
+    mode: l.mode || 'Phone Call',
+    contactPerson: l.contactPerson || '',
+    outstandingAmt: chain.outstanding || l.outstandingAmt || 0,
+    invoiceID: '', invoiceNo: '',
+    notes: notes,
+    promiseAmt: 0, promiseDate: '', promiseKept: 'Pending',
+    nextAction: nextDateISO ? (nextAction || 'Follow-up') : '',
+    nextActionDate: nextDateISO ? fmtLocalDate(nextDateISO) : '',
+    priority: l.priority || 'Medium', escalated: 'No', escalatedTo: '', attachmentURL: ''
+  };
+  var tempId = 'TMP-' + Date.now();
+  var optimistic = Object.assign({}, data, { followUpID: tempId, loggedBy: (USER && USER.name) || URL_NAME || '', loggedOn: data.datetime });
+  DB.followups = DB.followups || [];
+  DB.followups.unshift(optimistic);
+  _fuBoardRefreshAll();
+  _optimisticToast('✓ Follow-up update ho gaya');
+  google.script.run
+    .withSuccessHandler(function (r) {
+      if (r && r.success) {
+        var fu = (DB.followups || []).filter(function (f) { return f.followUpID === tempId; })[0];
+        if (fu) fu.followUpID = r.followUpID || tempId;
+        try { _idb.set('mainDB', DB); } catch (e) {}
+        if (typeof _silentDataRefresh === 'function') _silentDataRefresh();
+      } else {
+        DB.followups = (DB.followups || []).filter(function (f) { return f.followUpID !== tempId; });
+        _fuBoardRefreshAll();
+        Swal.fire('Error', (r && r.error) || 'Save failed', 'error');
+      }
+    })
+    .withFailureHandler(function (e) {
+      DB.followups = (DB.followups || []).filter(function (f) { return f.followUpID !== tempId; });
+      _fuBoardRefreshAll();
+      Swal.fire('Error', (e && e.message) || 'Network error', 'error');
+    })
+    .saveFollowUp(data, URL_NAME);
+}
+
+function _fuBoardRefreshAll() {
+  try { if (_activeMode === 'retail') { renderRetailFollowups(); } else { renderFollowups(); } } catch (e) {}
+  try { if (typeof _reRenderCurrent === 'function') _reRenderCurrent(); } catch (e) {}
+}
+
+function _fuBoardDefer(key, retail) {
+  var c = _fuFindChain(key, retail);
+  if (!c) return;
+  var d = new Date(); d.setDate(d.getDate() + 3);
+  var iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  Swal.fire({
+    title: 'Client ne taal diya',
+    html: '<div style="text-align:left;font-size:12px">' +
+      '<label style="font-weight:700">Kab baat karni hai?</label>' +
+      '<input id="df-date" type="date" class="swal2-input" style="margin:6px 0 10px;width:100%" value="' + iso + '">' +
+      '<label style="font-weight:700">Client ne kya kaha?</label>' +
+      '<input id="df-note" class="swal2-input" style="margin:6px 0 0;width:100%" placeholder="e.g. Owner bahar hai, Monday ko bolenge"></div>',
+    showCancelButton: true, confirmButtonText: 'Save', focusConfirm: false,
+    preConfirm: function () {
+      var dt = document.getElementById('df-date').value, nt = document.getElementById('df-note').value.trim();
+      if (!dt) { Swal.showValidationMessage('Next date zaroori hai'); return false; }
+      if (!nt) { Swal.showValidationMessage('Client ne kya kaha — likho'); return false; }
+      return { dt: dt, nt: nt };
+    }
+  }).then(function (r) {
+    if (r.isConfirmed) _fuQuickLog(c, 'Client ne taal diya: ' + r.value.nt, r.value.dt, 'Dobara follow-up');
+  });
+}
+
+function _fuBoardClose(key, retail) {
+  var c = _fuFindChain(key, retail);
+  if (!c) return;
+  Swal.fire({
+    title: 'Follow-up band karna hai?',
+    input: 'text', inputLabel: 'Result / kya hua',
+    inputPlaceholder: 'e.g. Payment mil gaya / Order cancel',
+    showCancelButton: true, confirmButtonText: 'Band karo',
+    inputValidator: function (v) { return !v || !v.trim() ? 'Result likhna zaroori hai' : null; }
+  }).then(function (r) {
+    if (r.isConfirmed) _fuQuickLog(c, 'Closed: ' + r.value.trim(), '', '');
+  });
+}
+
+// ── Modal me pichhla plan dikhao ─────────────────────────────
+function _fuShowPrevBanner(retail, id) {
+  var box = document.getElementById('fu-prev-banner');
+  if (!box) return;
+  var key = retail ? 'R::' + String(id || '').trim().toLowerCase() : 'S::' + String(id || '');
+  var arr = (DB.followups || []).filter(function (f) { return _fuKeyOf(f) === key; })
+    .sort(function (a, b) { return _fuTime(b) - _fuTime(a); });
+  if (!arr.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  var l = arr[0];
+  var plan = (l.nextAction || '') + (l.nextActionDate ? ' (' + l.nextActionDate + ')' : '');
+  box.style.display = 'block';
+  box.innerHTML = '<div style="background:#FEF7E0;border:1px solid #FDE293;border-radius:8px;padding:9px 12px;margin-bottom:12px;font-size:12px;line-height:1.5">' +
+    '<b><i class="fas fa-history"></i> Pichhla follow-up (' + escHTML(String(l.datetime || '').split(' ')[0]) + '):</b> ' + escHTML(l.notes || '-') + '<br>' +
+    (plan.trim() ? '<b>Plan tha:</b> ' + escHTML(plan) + '<br>' : '') +
+    '<span style="color:#B06000">Ab uska <b>outcome</b> likho, phir <b>Next Action Date</b> daalo — date na daalne par follow-up band maana jayega. (' + arr.length + ' baar baat ho chuki)</span></div>';
+}
+
+// ── Wrappers (existing functions ko touch kiye bina hook) ───
+(function () {
+  var _origFUParty = window.onFUParty;
+  if (typeof _origFUParty === 'function') {
+    window.onFUParty = function (partyID) { var r = _origFUParty.apply(this, arguments); try { _fuShowPrevBanner(false, partyID); } catch (e) {} return r; };
+  }
+  var _origSel = window._selectRetailFUCustomer;
+  if (typeof _origSel === 'function') {
+    window._selectRetailFUCustomer = function (name) { var r = _origSel.apply(this, arguments); try { _fuShowPrevBanner(true, name); } catch (e) {} return r; };
+  }
+  var _origClose = window.closeFUModal;
+  if (typeof _origClose === 'function') {
+    window.closeFUModal = function () {
+      var r = _origClose.apply(this, arguments);
+      var b = document.getElementById('fu-prev-banner'); if (b) { b.style.display = 'none'; b.innerHTML = ''; }
+      return r;
+    };
+  }
+  var _origRF = window.renderFollowups;
+  if (typeof _origRF === 'function') {
+    window.renderFollowups = function () { var r = _origRF.apply(this, arguments); try { renderFUBoard(false); } catch (e) {} return r; };
+  }
+  var _origRRF = window.renderRetailFollowups;
+  if (typeof _origRRF === 'function') {
+    window.renderRetailFollowups = function () { var r = _origRRF.apply(this, arguments); try { renderFUBoard(true); } catch (e) {} return r; };
+  }
+  // Date ke bina save = "closed" — pehle confirm
+  var _origSubmit = window.submitFollowUp;
+  if (typeof _origSubmit === 'function') {
+    window.submitFollowUp = function () {
+      var g = function (id) { var e = document.getElementById(id); return e ? (e.value || '').trim() : ''; };
+      if (g('fu-notes') && !g('fu-next-date') && !g('fu-promise-date') && !window._fuCloseOk) {
+        var self = this, args = arguments;
+        Swal.fire({
+          title: 'Next follow-up date nahi daali',
+          text: 'Date ke bina ye party ka follow-up "Closed" ho jayega aur Action Board se hat jayega. Band karna hai?',
+          icon: 'question', showCancelButton: true,
+          confirmButtonText: 'Haan, band karo', cancelButtonText: 'Date daalta hoon'
+        }).then(function (r) { if (r.isConfirmed) { window._fuCloseOk = true; try { _origSubmit.apply(self, args); } finally { window._fuCloseOk = false; } } });
+        return;
+      }
+      return _origSubmit.apply(this, arguments);
+    };
+  }
+})();
