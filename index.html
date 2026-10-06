@@ -38,6 +38,13 @@
         if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
       });
     };
+    // Poll until testFn() is truthy (or timeout) — used by upload code if a lib is still loading.
+    window.__waitLib = function (testFn, ms) {
+      return new Promise(function (res) {
+        var t0 = Date.now();
+        (function chk() { if (testFn() || Date.now() - t0 > ms) return res(); setTimeout(chk, 100); })();
+      });
+    };
     window.addEventListener('load', function () { setTimeout(window.__loadHeavyLibs, 1500); });
   </script>
   <!-- JSONP bridge to the Apps Script backend — polyfills google.script.run so
@@ -3435,7 +3442,42 @@
     body.dark .stat-val {
       color: var(--text);
     }
-  </style>
+  
+/* Global process overlay */
+#global-process {
+  position: fixed; inset: 0; z-index: 99998;
+  background: rgba(15,23,42,.45); backdrop-filter: blur(3px);
+  display: none; align-items: center; justify-content: center;
+}
+#global-process.show { display: flex; }
+.gp-card {
+  background: #0F172A; color: #E2E8F0; border-radius: 16px;
+  padding: 28px 32px; min-width: 280px; max-width: 90vw;
+  box-shadow: 0 20px 50px rgba(0,0,0,.35); text-align: center;
+  border: 1px solid rgba(255,255,255,.08);
+}
+.gp-spinner {
+  width: 42px; height: 42px; margin: 0 auto 14px;
+  border: 3px solid rgba(124,58,237,.25); border-top-color: #7C3AED;
+  border-radius: 50%; animation: gp-spin .7s linear infinite;
+}
+@keyframes gp-spin { to { transform: rotate(360deg); } }
+.gp-title { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+.gp-sub { font-size: 12px; color: #94A3B8; margin-bottom: 14px; min-height: 16px; }
+.gp-bar { height: 3px; background: rgba(255,255,255,.08); border-radius: 99px; overflow: hidden; }
+.gp-bar-fill {
+  height: 100%; width: 40%; background: linear-gradient(90deg,#7C3AED,#A78BFA);
+  border-radius: 99px; animation: gp-slide 1.2s ease-in-out infinite;
+}
+@keyframes gp-slide {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(180%); }
+  100% { transform: translateX(-100%); }
+}
+body.gp-locked { pointer-events: none; overflow: hidden; }
+body.gp-locked #global-process { pointer-events: auto; }
+
+</style>
 </head>
 
 <body>
@@ -3604,13 +3646,17 @@
             style="display:none">
             <i class="fas fa-chart-pie" style="color:#7C3AED"></i><span class="sb-lbl">Dashboard</span>
           </div>
-          <div class="sb-nav-item" id="nav-retailUpload" data-tip="Upload Register" onclick="nav('retailUpload')"
+          <div class="sb-nav-item" id="nav-retailUpload" data-tip="Daily PDF Upload" onclick="nav('retailUpload')"
             style="display:none">
-            <i class="fas fa-cloud-upload-alt" style="color:#7C3AED"></i><span class="sb-lbl">Upload Register</span>
+            <i class="fas fa-cloud-upload-alt" style="color:#7C3AED"></i><span class="sb-lbl">Daily Upload</span>
           </div>
-          <div class="sb-nav-item" id="nav-retailSales" data-tip="Sales Register" onclick="nav('retailSales')"
+          <div class="sb-nav-item" id="nav-retailSales" data-tip="Customer Sale Register" onclick="nav('retailSales')"
             style="display:none">
-            <i class="fas fa-receipt" style="color:#7C3AED"></i><span class="sb-lbl">Sales Register</span>
+            <i class="fas fa-receipt" style="color:#7C3AED"></i><span class="sb-lbl">Sale Register</span>
+          </div>
+          <div class="sb-nav-item" id="nav-retailAging" data-tip="Outstanding Aging" onclick="nav('retailAging')"
+            style="display:none">
+            <i class="fas fa-hourglass-half" style="color:#7C3AED"></i><span class="sb-lbl">Aging</span>
           </div>
           <div class="sb-nav-divider" data-mode="retail" style="display:none"></div>
           <div class="sb-section-label" data-mode="retail" style="display:none">Manage</div>
@@ -3624,13 +3670,13 @@
           </div>
           <div class="sb-nav-divider" data-mode="retail" style="display:none"></div>
           <div class="sb-section-label" data-mode="retail" style="display:none">Follow-ups</div>
-          <div class="sb-nav-item" id="nav-retailFollowups" data-tip="All Follow-ups" onclick="nav('retailFollowups')"
+          <div class="sb-nav-item" id="nav-retailFollowups" data-tip="Retail Follow-ups" onclick="nav('retailFollowups')"
             style="display:none">
-            <i class="fas fa-phone-alt" style="color:#7C3AED"></i><span class="sb-lbl">All Follow-ups</span>
+            <i class="fas fa-phone-alt" style="color:#7C3AED"></i><span class="sb-lbl">Follow-up Log</span>
           </div>
           <div class="sb-nav-item" id="nav-retailPromises" data-tip="Promise Tracker" onclick="nav('retailPromises')"
             style="display:none">
-            <i class="fas fa-handshake" style="color:#7C3AED"></i><span class="sb-lbl">Promise Tracker</span>
+            <i class="fas fa-handshake" style="color:#7C3AED"></i><span class="sb-lbl">Promises</span>
           </div>
           <div class="sb-nav-item" id="nav-retailEscalations" data-tip="Escalations" onclick="nav('retailEscalations')"
             style="display:none">
@@ -3662,10 +3708,10 @@
 
           <div class="sb-nav-divider" data-mode="supply"></div>
           <div class="sb-section-label" data-mode="supply">Follow-ups</div>
-          <div class="sb-nav-item" id="nav-followups" data-tip="All Follow-ups" onclick="nav('followups')"><i
-              class="fas fa-phone-alt"></i><span class="sb-lbl">All Follow-ups</span></div>
+          <div class="sb-nav-item" id="nav-followups" data-tip="Retail Follow-ups" onclick="nav('followups')"><i
+              class="fas fa-phone-alt"></i><span class="sb-lbl">Follow-up Log</span></div>
           <div class="sb-nav-item" id="nav-promises" data-tip="Promise Tracker" onclick="nav('promises')"><i
-              class="fas fa-handshake"></i><span class="sb-lbl">Promise Tracker</span></div>
+              class="fas fa-handshake"></i><span class="sb-lbl">Promises</span></div>
           <div class="sb-nav-item nav-admin-only" id="nav-escalations" data-tip="Escalations"
             onclick="nav('escalations')" style="display:none"><i class="fas fa-arrow-up"></i><span
               class="sb-lbl">Escalations</span></div>
@@ -3694,6 +3740,11 @@
               <div class="sb-user-dept" id="sb-dept">...</div>
             </div>
           </div>
+          <button class="sb-logout-btn" onclick="clearAppCache()" title="Clear local cache &amp; reload fresh data"
+            style="margin-bottom:6px;background:transparent;border:1px solid rgba(255,255,255,.12);color:#94A3B8">
+            <i class="fas fa-broom"></i>
+            <span class="sb-logout-lbl">Clear Cache</span>
+          </button>
           <button class="sb-logout-btn" onclick="doLogout()">
             <i class="fas fa-sign-out-alt"></i>
             <span class="sb-logout-lbl">Sign Out</span>
@@ -5409,6 +5460,9 @@
                 <button class="btn btn-secondary" onclick="_rdQuickUpload()">
                   <i class="fas fa-cloud-upload-alt"></i> New Upload
                 </button>
+                <button class="btn btn-amber" onclick="openRetailFUModal()">
+                  <i class="fas fa-phone-alt"></i> Log Follow-up
+                </button>
                 <button class="btn btn-primary" onclick="_rdQuickRecordPay()" style="background:#7C3AED;border-color:#7C3AED">
                   <i class="fas fa-indian-rupee-sign"></i> Record Payment
                 </button>
@@ -5441,8 +5495,30 @@
                 <div class="stat-sub">retail collections</div>
               </div>
             </div>
+            <div class="g4" style="margin-bottom:14px">
+              <div class="stat-card" style="border-left:3px solid #EA4335;cursor:pointer" onclick="nav('retailFollowups')">
+                <div class="stat-label">Follow-ups Today</div>
+                <div class="stat-val" id="rd-fu-today" style="color:#EA4335">0</div>
+                <div class="stat-sub">logged today</div>
+              </div>
+              <div class="stat-card" style="border-left:3px solid #F9AB00;cursor:pointer" onclick="nav('retailPromises')">
+                <div class="stat-label">Open Promises</div>
+                <div class="stat-val" id="rd-fu-promises" style="color:#F9AB00">0</div>
+                <div class="stat-sub">pending commitments</div>
+              </div>
+              <div class="stat-card" style="border-left:3px solid #EA4335;cursor:pointer" onclick="nav('retailPromises')">
+                <div class="stat-label">Overdue Promises</div>
+                <div class="stat-val" id="rd-fu-overdue" style="color:#EA4335">0</div>
+                <div class="stat-sub">past promise date</div>
+              </div>
+              <div class="stat-card" style="border-left:3px solid #7C3AED;cursor:pointer" onclick="nav('retailEscalations')">
+                <div class="stat-label">Escalations</div>
+                <div class="stat-val" id="rd-fu-esc" style="color:#7C3AED">0</div>
+                <div class="stat-sub">open escalated cases</div>
+              </div>
+            </div>
 
-            <div style="display:grid;grid-template-columns:1fr 340px;gap:16px">
+            <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:16px">
               <div class="card">
                 <div style="padding:12px 18px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;display:flex;justify-content:space-between;align-items:center">
                   <span><i class="fas fa-user-tag" style="color:#7C3AED;margin-right:6px"></i>Customer-wise Outstanding</span>
@@ -5464,35 +5540,15 @@
               </div>
 
               <div style="display:flex;flex-direction:column;gap:16px">
-                <div class="card">
-                  <div style="padding:12px 18px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px">
-                    <i class="fas fa-bolt" style="color:#F9AB00;margin-right:6px"></i>Quick Actions
-                  </div>
-                  <div style="padding:10px 12px;display:flex;flex-direction:column;gap:6px">
-                    <button class="btn btn-secondary" onclick="_rdQuickUpload()" style="justify-content:flex-start;font-size:12px;padding:9px 14px">
-                      <i class="fas fa-cloud-upload-alt" style="color:#7C3AED;width:16px"></i> Upload Register
-                    </button>
-                    <button class="btn btn-secondary" onclick="_rdQuickAddCust()" style="justify-content:flex-start;font-size:12px;padding:9px 14px">
-                      <i class="fas fa-user-plus" style="color:#4285F4;width:16px"></i> Add Customer
-                    </button>
-                    <button class="btn btn-secondary" onclick="_rdQuickRecordPay()" style="justify-content:flex-start;font-size:12px;padding:9px 14px">
-                      <i class="fas fa-indian-rupee-sign" style="color:#34A853;width:16px"></i> Record Payment
-                    </button>
-                    <button class="btn btn-secondary" onclick="openRetailFUModal()" style="justify-content:flex-start;font-size:12px;padding:9px 14px">
-                      <i class="fas fa-phone-alt" style="color:#EA4335;width:16px"></i> Log Follow-up
-                    </button>
-                    <button class="btn btn-secondary" onclick="_rdQuickPayments()" style="justify-content:flex-start;font-size:12px;padding:9px 14px">
-                      <i class="fas fa-hand-holding-usd" style="color:#F9AB00;width:16px"></i> View Payments
-                    </button>
-                  </div>
-                </div>
-
-                <div class="card">
+                <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:280px">
                   <div style="padding:12px 18px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px;display:flex;justify-content:space-between;align-items:center">
-                    <span><i class="fas fa-phone-alt" style="color:#EA4335;margin-right:6px"></i>Recent Follow-ups</span>
-                    <button onclick="nav('retailFollowups')" style="font-size:10px;color:#7C3AED;font-weight:600;background:none;border:none;cursor:pointer">All →</button>
+                    <span><i class="fas fa-phone-alt" style="color:#EA4335;margin-right:6px"></i>Follow-up Activity</span>
+                    <div style="display:flex;gap:8px;align-items:center">
+                      <button class="btn btn-sm btn-amber" onclick="openRetailFUModal()" style="font-size:10px;padding:4px 10px"><i class="fas fa-plus"></i> Log</button>
+                      <button onclick="nav('retailFollowups')" style="font-size:10px;color:#7C3AED;font-weight:600;background:none;border:none;cursor:pointer">All →</button>
+                    </div>
                   </div>
-                  <div id="rd-fu-list" style="padding:6px 14px 10px;max-height:220px;overflow-y:auto" class="scroll"></div>
+                  <div id="rd-fu-list" style="padding:6px 14px 10px;flex:1;max-height:360px;overflow-y:auto" class="scroll"></div>
                 </div>
                 <div class="card">
                   <div style="padding:12px 18px;border-bottom:1px solid var(--border);font-weight:700;font-size:13px">
@@ -5500,6 +5556,42 @@
                   </div>
                   <div id="rd-recent-activity" style="padding:6px 14px 10px"></div>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="view-retailAging" class="view">
+            <div class="page-hd">
+              <div>
+                <div class="page-title">Retail Aging</div>
+                <div class="page-sub">Outstanding by age buckets</div>
+              </div>
+              <button class="btn btn-primary" onclick="_rdQuickRecordPay()" style="background:#7C3AED;border-color:#7C3AED">
+                <i class="fas fa-indian-rupee-sign"></i> Record Payment
+              </button>
+            </div>
+            <div class="g4" style="margin-bottom:14px">
+              <div class="stat-card sc-green"><div class="stat-label">0–7 days</div><div class="stat-val" id="ra-b0">₹0</div></div>
+              <div class="stat-card sc-blue"><div class="stat-label">8–15 days</div><div class="stat-val" id="ra-b1">₹0</div></div>
+              <div class="stat-card sc-amber"><div class="stat-label">16–30 days</div><div class="stat-val" id="ra-b2">₹0</div></div>
+              <div class="stat-card sc-red"><div class="stat-label">30+ days</div><div class="stat-val" id="ra-b3">₹0</div></div>
+            </div>
+            <div class="card">
+              <div class="tbl-wrap">
+                <table class="tbl">
+                  <thead>
+                    <tr>
+                      <th>Customer</th>
+                      <th class="num">0–7d</th>
+                      <th class="num">8–15d</th>
+                      <th class="num">16–30d</th>
+                      <th class="num">30+d</th>
+                      <th class="num">Total</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ra-tbody"></tbody>
+                </table>
               </div>
             </div>
           </div>
@@ -5770,7 +5862,7 @@
                 <div class="page-title">Reports & Analytics</div>
                 <div class="page-sub">Visual insights on outstanding, collections and follow-up activity</div>
               </div>
-              <button class="btn btn-primary" onclick="loadReports()"><i class="fas fa-sync-alt"></i> Refresh</button>
+              <button class="btn btn-primary" onclick="doForceRefresh()"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
 
             <div class="card card-p" style="margin-bottom:14px">
