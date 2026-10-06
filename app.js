@@ -1,0 +1,7635 @@
+
+
+// app.js ke top pe add karein
+var _debouncedRenderParties = _debounce(renderParties, 250);
+var _debouncedRenderInvoices = _debounce(renderInvoices, 250);
+var _debouncedRenderPayments = _debounce(renderPayments, 250);
+var _debouncedRenderFollowups = _debounce(renderFollowups, 250);
+var _debouncedRenderRetailSales = _debounce(function() {
+  if (typeof renderRetailSales === 'function') renderRetailSales();
+}, 250);
+
+
+// ============================================================
+// IndexedDB cache — full DB stored locally for instant loads
+// ============================================================
+
+var _idb = (function() {
+  var DB_NAME = 'fresko_cache';
+  var STORE = 'db_store';
+  var _db = null;
+
+  function open() {
+    return new Promise(function(resolve, reject) {
+      if (_db) return resolve(_db);
+      var req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = function(e) {
+        var db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE)) {
+          db.createObjectStore(STORE);
+        }
+      };
+      req.onsuccess = function(e) { _db = e.target.result; resolve(_db); };
+      req.onerror = function() { reject('IndexedDB unavailable'); };
+    });
+  }
+
+  return {
+    get: function(key) {
+      return open().then(function(db) {
+        return new Promise(function(resolve) {
+          var tx = db.transaction(STORE, 'readonly');
+          var req = tx.objectStore(STORE).get(key);
+          req.onsuccess = function() { resolve(req.result || null); };
+          req.onerror = function() { resolve(null); };
+        });
+      });
+    },
+    set: function(key, value) {
+      return open().then(function(db) {
+        return new Promise(function(resolve) {
+          var tx = db.transaction(STORE, 'readwrite');
+          tx.objectStore(STORE).put(value, key);
+          tx.oncomplete = function() { resolve(true); };
+          tx.onerror = function() { resolve(false); };
+        });
+      });
+    },
+    remove: function(key) {
+      return open().then(function(db) {
+        var tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).delete(key);
+      });
+    }
+  };
+})();
+
+
+'use strict';
+
+      // --- PERFORMANCE UTILS ---
+      function _debounce(fn, ms) {
+        let t;
+        return function() { clearTimeout(t); t = setTimeout(() => fn.apply(this, arguments), ms); };
+      }
+      // RequestAnimationFrame wrapper for smooth renders
+      function _raf(fn) { (window.requestAnimationFrame || setTimeout)(fn, 0); }
+
+      // --- LOGIN LOGIC ---
+      let _user = null;
+      function toggleEye(btn) {
+        const inp = document.getElementById('f-pass');
+        const show = inp.type === 'password';
+        inp.type = show ? 'text' : 'password';
+        btn.querySelector('i').className = show ? 'fas fa-eye-slash' : 'fas fa-eye';
+      }
+      function showErr(msg) {
+        const b = document.getElementById('eb');
+        document.getElementById('et').textContent = msg;
+        b.classList.remove('on');
+        void b.offsetWidth;
+        b.classList.add('on');
+      }
+      function clearErr() { document.getElementById('eb').classList.remove('on'); }
+      function setBusy(on) {
+        const b = document.getElementById('btn');
+        b.classList.toggle('busy', on);
+        b.disabled = on;
+      }
+      function doLogin() {
+        clearErr();
+        const email = document.getElementById('f-email').value.trim().toLowerCase();
+        const pass = document.getElementById('f-pass').value.trim();
+        if (!email) { showErr('Please enter your email address.'); return; }
+        if (!pass) { showErr('Please enter your password.'); return; }
+        setBusy(true);
+        google.script.run
+          .withSuccessHandler(function (res) {
+            setBusy(false);
+            if (res.success) {
+              _user = res.user;
+              window.__ISE_USER = res.user; // Set global user
+              showWelcome(res.user);
+            } else {
+              showErr(res.error || 'Invalid credentials.');
+            }
+          })
+          .withFailureHandler(function (err) {
+            setBusy(false);
+            showErr('Connection error. Please try again.');
+          })
+          .loginUser({ email: email, password: pass });
+      }
+      function showWelcome(u) {
+        const parts = (u.name || 'IS').trim().split(/\s+/);
+        const initials = parts.length >= 2 ? parts[0][0] + parts[parts.length - 1][0] : (parts[0] || 'IS').slice(0, 2);
+        document.getElementById('wav').textContent = initials.toUpperCase();
+        document.getElementById('wn').textContent = u.name;
+        document.getElementById('wd').textContent = (u.dept || '') + ' DEPARTMENT';
+        document.getElementById('we').textContent = u.email;
+        document.getElementById('form-area').style.display = 'none';
+        document.getElementById('wc').style.display = 'block';
+      }
+      function enterApp(mode) {
+        if (!_user) return;
+        USER = _user;
+        URL_NAME = _user.name || '';
+        URL_DEPT = _user.dept || '';
+        URL_ROLE = _user.role || '';
+        window.__ISE_USER = _user;
+        try { localStorage.setItem('fresko_user', JSON.stringify(_user)); } catch(e) {}
+
+        // ── Mode setup (fallback to saved preference or 'supply') ──
+        if (mode === 'supply' || mode === 'retail') {
+          _activeMode = mode;
+          try { localStorage.setItem('fresko_mode', mode); } catch(e) {}
+        } else {
+          try {
+            var savedMode = localStorage.getItem('fresko_mode');
+            if (savedMode === 'retail' || savedMode === 'supply') _activeMode = savedMode;
+          } catch(e) {}
+        }
+        _modeInitialized = true;
+
+        document.getElementById('login-wrapper').style.display = 'none';
+        document.getElementById('app-wrapper').style.display = 'flex';
+        _setUserUI();
+        _applyPermissions();
+        _applyModeUI();
+
+        google.script.run
+          .withSuccessHandler(_onDataLoaded)
+          .withFailureHandler(_onFail)
+          .getAllData(URL_NAME);
+      }
+
+      // Called from welcome screen mode buttons
+      function selectMode(mode) {
+        if (mode !== 'supply' && mode !== 'retail') return;
+        _activeMode = mode;
+        try { localStorage.setItem('fresko_mode', mode); } catch(e) {}
+        enterApp(mode);
+      }
+
+
+      (function(){try{var s=localStorage.getItem('fresko_user');if(s){var u=JSON.parse(s);if(u&&u.name)_user=u;}}catch(e){}})();
+
+      (function(){try{var s=localStorage.getItem('fresko_user');if(s){var u=JSON.parse(s);if(u&&u.name)_user=u;}}catch(e){}})();
+
+         let DB = { parties: [], invoices: [], payments: [], followups: [], retailCustomers: [], config: {}, stats: {}, userInfo: {} };
+      let USER = {};          // logged-in user
+      let _loadedOnce = false;
+      let _lastUpdate = '0';
+      let _activeView = 'dashboard';
+      let _sbCollapsed = true; // start collapsed -- matches screenshot (icon-only mode)
+      let _charts = {};       // Chart.js instances
+      let _fuTab = 'today';   // dashboard followup tab
+
+      // ── Mode System (Supply vs Retail) ──────────────────────
+      var _activeMode = 'supply';   // 'supply' | 'retail'
+      var _modeInitialized = false;
+
+      // Nav items — supply mode
+      var SUPPLY_NAV_ITEMS = [
+        'nav-dashboard', 'nav-todayDue', 'nav-overdue',
+        'nav-parties', 'nav-addParty',
+        'nav-invoices', 'nav-pending', 'nav-addInvoice', 'nav-upload',
+        'nav-slab15due', 'nav-slab1due', 'nav-slabNildue', 'nav-shortpay',
+        'nav-payments', 'nav-latepay', 'nav-recPayment',
+        'nav-followups', 'nav-promises', 'nav-escalations',
+        'nav-reports', 'nav-discountTBG', 'nav-writeoffs'
+      ];
+
+      // Nav items — retail mode
+      var RETAIL_NAV_ITEMS = [
+        'nav-retailDashboard', 'nav-retailUpload', 'nav-retailSales',
+        'nav-retailCustomers', 'nav-retailPayments',
+        'nav-retailFollowups', 'nav-retailPromises', 'nav-retailEscalations'
+      ];
+
+      // Default view after mode selection
+      var SUPPLY_HOME_VIEW = 'dashboard';
+      var RETAIL_HOME_VIEW = 'retailDashboard';
+
+      const PER = 25;
+      let _pState = { parties: 1, invoices: 1, payments: 1, followups: 1, promises: 1, escalations: 1, shortpay: 1, latepay: 1, discountTBG: 1, writeoffs: 1 };
+      let _filtered = { parties: [], invoices: [], payments: [], followups: [] };
+      let _filters = { party: 'ALL', inv: 'ALL', fu: 'ALL', promise: 'ALL' };
+
+      // User info injected by getIndexHtml() server-side OR from URL params
+      // Works for both Google Sites embed (document.write) and direct URL access
+      const _urlParams = new URLSearchParams(window.location.search);
+      let URL_NAME = (window.__ISE_USER && window.__ISE_USER.name) || decodeURIComponent(_urlParams.get('Name') || '');
+      let URL_DEPT = (window.__ISE_USER && window.__ISE_USER.dept) || decodeURIComponent(_urlParams.get('Dept') || '');
+      let URL_ROLE = (window.__ISE_USER && window.__ISE_USER.role) || decodeURIComponent(_urlParams.get('Role') || '');
+
+      (function applyUser() {
+        if (_user && _user.name) {
+          USER = _user;
+          URL_NAME = _user.name || '';
+          URL_DEPT = _user.dept || '';
+          URL_ROLE = _user.role || '';
+          window.__ISE_USER = _user;
+          var lw = document.getElementById('login-wrapper');
+          var aw = document.getElementById('app-wrapper');
+          if (lw) lw.style.display = 'none';
+          if (aw) aw.style.display = 'flex';
+          return;
+        }
+        if (!URL_NAME) return;
+        USER = { name: URL_NAME, dept: URL_DEPT, role: URL_ROLE };
+        _setUserUI();
+        _applyPermissions();
+      })();
+
+
+window.onload = function () {
+  var _fyEl = document.getElementById('footer-year');
+  if (_fyEl) _fyEl.textContent = new Date().getFullYear();
+
+  // ── Load saved mode preference ────────────────────────────
+  _loadModePreference();
+
+  var dashDateEl = document.getElementById('dash-date');
+  if (dashDateEl) {
+    dashDateEl.textContent =
+      new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  }
+
+  _setDefaultDates();
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.search-wrap') && !e.target.closest('.ac-drop'))
+      document.querySelectorAll('.ac-drop').forEach(d => d.classList.remove('show'));
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      closeRPModal(); closeFUModal(); closePartyModal();
+    }
+  });
+
+  // If user is logged in → try IndexedDB cache first (INSTANT render)
+  if (_user && _user.name) {
+    _setUserUI();
+    _applyPermissions();
+
+  _idb.get('mainDB').then(function(cached) {
+  // Only trust cache if it has real data — empty cache is a red flag
+  var hasRealData = cached && cached.success && (
+    (cached.invoices && cached.invoices.length > 0) ||
+    (cached.parties && cached.parties.length > 0)
+  );
+  if (hasRealData) {
+    DB = cached;
+    _lastUpdate = cached.lastUpdate || '0';
+    document.getElementById('loader').style.display = 'none';
+    _applyPermissions();
+    _populateFilters();
+    _buildAllPartySS();
+    _updateBadges();
+    _refreshRetailOutstanding();
+    if (!_loadedOnce) {
+      _loadedOnce = true;
+      if (typeof _applyModeUI === 'function') _applyModeUI();
+      var home = (typeof _activeMode !== 'undefined' && _activeMode === 'retail')
+        ? (typeof RETAIL_HOME_VIEW !== 'undefined' ? RETAIL_HOME_VIEW : 'retailDashboard')
+        : (typeof SUPPLY_HOME_VIEW !== 'undefined' ? SUPPLY_HOME_VIEW : 'dashboard');
+      nav(home);
+    }
+    _backgroundSync();
+  } else {
+    // Empty/stale cache → always fetch fresh from backend
+    _initialNetworkLoad();
+  }
+}).catch(function() {
+  _initialNetworkLoad();
+});
+  } else {
+    // No logged-in user → login screen dikhao, loader hide karo
+    var ldr = document.getElementById('loader');
+    if (ldr) ldr.style.display = 'none';
+  }
+};
+
+
+
+function _initialNetworkLoad() {
+  var uname = (_user && _user.name) || URL_NAME || '';
+  if (!uname) {
+    // No user → show login
+    document.getElementById('loader').style.display = 'none';
+    document.getElementById('app-wrapper').style.display = 'none';
+    document.getElementById('login-wrapper').style.display = 'flex';
+    return;
+  }
+  google.script.run
+    .withSuccessHandler(_onDataLoaded)
+    .withFailureHandler(function() {
+      try { localStorage.removeItem('fresko_user'); } catch(e) {}
+      _user = null; location.reload();
+    })
+    .getAllData(uname);
+}
+
+
+function _backgroundSync() {
+  google.script.run
+    .withSuccessHandler(function(data) {
+      if (!data || !data.success) return;
+      // If unchanged BUT our DB is empty → force full fetch
+      if (data.unchanged) {
+        var isEmpty = !DB || !DB.invoices || DB.invoices.length === 0;
+        if (!isEmpty) return;
+        google.script.run
+          .withSuccessHandler(function(full) {
+            if (!full || !full.success) return;
+            DB = full;
+            _lastUpdate = full.lastUpdate || _lastUpdate;
+            _idb.set('mainDB', full);
+            _updateBadges();
+            _populateFilters();
+            _reRenderCurrent();
+            _refreshRetailOutstanding();
+          })
+          .getAllData((USER && USER.name) || URL_NAME, '0');
+        return;
+      }
+      DB = data;
+      _lastUpdate = data.lastUpdate || _lastUpdate;
+      _idb.set('mainDB', data);
+      _updateBadges();
+      _populateFilters();
+      _reRenderCurrent();
+      _refreshRetailOutstanding();
+    })
+    .withFailureHandler(function() { /* silent fail */ })
+    .getAllData((USER && USER.name) || URL_NAME, _lastUpdate);
+}
+
+function _onDataLoaded(data) {
+  if (!data || !data.success) { _onFail({ message: data ? data.error : 'Load failed' }); return; }
+  DB = data;
+  document.getElementById('loader').style.display = 'none';
+
+  if (data.userInfo && data.userInfo.foundInDB) {
+    USER = Object.assign(USER, data.userInfo);
+    if (!URL_NAME && USER.name) URL_NAME = USER.name;
+    _setUserUI();
+  }
+
+  _applyPermissions();
+  _populateFilters();
+  _buildAllPartySS();
+  _updateBadges();
+
+  if (!_loadedOnce) {
+    _loadedOnce = true;
+    // Respect saved mode (retail vs supply) — don't always force supply dashboard
+    if (typeof _applyModeUI === 'function') _applyModeUI();
+    var home = (typeof _activeMode !== 'undefined' && _activeMode === 'retail')
+      ? (typeof RETAIL_HOME_VIEW !== 'undefined' ? RETAIL_HOME_VIEW : 'retailDashboard')
+      : (typeof SUPPLY_HOME_VIEW !== 'undefined' ? SUPPLY_HOME_VIEW : 'dashboard');
+    nav(home);
+  } else {
+    _reRenderCurrent();
+  }
+}
+
+     
+      function _onFail(err) {
+        document.getElementById('loader').innerHTML =
+          `<div style="text-align:center;padding:24px">
+      <i class="fas fa-exclamation-circle" style="font-size:32px;color:var(--red);margin-bottom:12px;display:block"></i>
+      <div style="font-weight:700;color:var(--red);margin-bottom:8px">Failed to load data</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:16px">${err.message || 'Unknown error'}</div>
+      <button class="btn btn-primary" onclick="location.reload()">Reload</button>
+    </div>`;
+      }
+
+      function _setUserUI() {
+        const name = USER.name || 'IS';
+        const initials = name.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+        const photoURL = USER.profileImageURL || '';
+
+        const avatarEl = document.getElementById('sb-avatar');
+        if (avatarEl) {
+          if (photoURL) {
+            avatarEl.innerHTML = '';
+            avatarEl.style.background = 'none';
+            avatarEl.style.padding = '0';
+            avatarEl.style.overflow = 'hidden';
+            const img = document.createElement('img');
+            img.src = photoURL;
+            img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:50%';
+            img.onerror = () => {
+              avatarEl.innerHTML = initials;
+              avatarEl.style.background = 'linear-gradient(135deg,#C5221F,#EA4335)';
+              avatarEl.style.padding = '';
+            };
+            avatarEl.appendChild(img);
+          } else {
+            avatarEl.textContent = initials;
+            avatarEl.style.background = 'linear-gradient(135deg,#C5221F,#EA4335)';
+          }
+        }
+
+        const nameEl = document.getElementById('sb-name');
+        if (nameEl) nameEl.textContent = name;
+        const deptEl = document.getElementById('sb-dept');
+        if (deptEl && !deptEl.querySelector('.sb-role-badge')) {
+          deptEl.textContent = USER.dept || '';
+        }
+      }
+
+      function _applyPermissions() {
+        const role = (USER.role || URL_ROLE || '').toString().trim().toUpperCase();
+        const isAdmin = role === 'ADMIN'; // ONLY Role=ADMIN gets admin access
+
+        // ── Capability flags ────────────────────────────────────
+        window._isAdmin          = isAdmin;
+        window._canRecordPay     = true;    // both Admin and User
+        window._canLogFollowup   = true;    // both
+        window._canUpload        = true;    // both
+        window._canViewAnalytics = isAdmin; // Admin only
+        window._canViewDTBG      = isAdmin; // Admin only
+        window._userRole         = role;
+
+        // ── Sidebar: nav-admin-only items ───────────────────────
+        document.querySelectorAll('.nav-admin-only').forEach(el => {
+          const isDiv = el.classList.contains('sb-nav-divider') || el.classList.contains('sb-section-label');
+          el.style.display = isAdmin ? (isDiv ? 'block' : 'flex') : 'none';
+        });
+
+        // ── Inline admin-only elements (edit btns, etc.) ────────
+        document.querySelectorAll('.admin-only').forEach(el => {
+          el.style.display = isAdmin ? '' : 'none';
+        });
+
+        // ── Always-visible nav (both roles) ────────────────────
+        const alwaysVisible = [
+          'nav-dashboard', 'nav-todayDue', 'nav-overdue',
+          'nav-parties', 'nav-pending',
+          'nav-invoices', 'nav-addInvoice', 'nav-upload',
+          'nav-slab15due', 'nav-slab1due', 'nav-slabNildue',
+          'nav-shortpay', 'nav-payments', 'nav-latepay', 'nav-recPayment',
+          'nav-followups', 'nav-promises'
+        ];
+        alwaysVisible.forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.style.display = 'flex';
+        });
+
+        // ── Sidebar role badge ──────────────────────────────────
+        const deptEl = document.getElementById('sb-dept');
+        if (deptEl) {
+          const label = isAdmin ? 'Admin' : 'User';
+          const color = isAdmin ? '#EA4335' : '#475569';
+          const dept = (USER.dept || URL_DEPT || '').toString().trim().toUpperCase() || 'ACCOUNT';
+          deptEl.innerHTML =
+            `<span style="color:#475569;font-size:10px">${dept}</span>` +
+            `<span class="sb-role-badge" style="background:${color};color:#fff">${label}</span>`;
+        }
+
+        // ── Mode UI (called after permissions so admin-only works) ──
+        if (typeof _applyModeUI === 'function') _applyModeUI();
+      }
+
+function _silentRefresh() {
+  var uname = (USER && USER.name) || URL_NAME || '';
+  if (!uname) return;
+
+  google.script.run
+    .withSuccessHandler(function(data) {
+      if (!data || !data.success || data.unchanged) return;
+      DB = data;
+      _lastUpdate = data.lastUpdate || _lastUpdate;
+      _idb.set('mainDB', data);
+      _updateBadges();
+      _populateFilters();
+      _reRenderCurrent();
+      if (typeof _refreshRetailViews === 'function') _refreshRetailViews();
+    })
+    .withFailureHandler(function() { /* silent */ })
+    .getAllData(uname, _lastUpdate);
+}
+
+var _pendingGetAll = null;
+function _coalescedGetAll(uname, ts, callback) {
+  if (_pendingGetAll) {
+    _pendingGetAll.push(callback);
+    return;
+  }
+  _pendingGetAll = [callback];
+  google.script.run
+    .withSuccessHandler(function(data) {
+      var cbs = _pendingGetAll || [];
+      _pendingGetAll = null;
+      cbs.forEach(function(cb) { try { cb(data); } catch(e){} });
+    })
+    .withFailureHandler(function(err) {
+      var cbs = _pendingGetAll || [];
+      _pendingGetAll = null;
+      cbs.forEach(function(cb) { try { cb(null, err); } catch(e){} });
+    })
+    .getAllData(uname, ts);
+}
+
+
+function manualRefresh() {
+  var icon = document.getElementById('refresh-icon');
+  if (icon) { icon.classList.add('spinning'); icon.style.pointerEvents = 'none'; }
+  var uname = (USER && USER.name) || URL_NAME || '';
+  _coalescedGetAll(uname, '0', function(data, err) { // ts='0' forces full fetch
+    if (icon) { icon.classList.remove('spinning'); icon.style.pointerEvents = ''; }
+    if (err || !data || !data.success) {
+      Swal.fire('Error', (data && data.error) || (err && err.message) || 'Refresh failed', 'error');
+      return;
+    }
+     DB = data;
+    _lastUpdate = data.lastUpdate || _lastUpdate;
+    _idb.set('mainDB', data);
+    _updateBadges();
+    _populateFilters();
+    _buildAllPartySS();
+    _reRenderCurrent();
+    _refreshRetailOutstanding();
+    if (typeof _refreshRetailViews === 'function') _refreshRetailViews();
+    var tb = document.getElementById('tb-crumb');
+    if (tb) { var prev = tb.textContent; tb.textContent = '✓ Refreshed'; setTimeout(() => { tb.textContent = prev; }, 1200); }
+  });
+}
+
+
+
+// Example: After submitPayment succeeds, existing flow already refreshes.
+// For OPTIMISTIC feedback, add a small toast IMMEDIATELY on button click:
+
+function _optimisticToast(msg) {
+  var t = document.createElement('div');
+  t.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#1E293B;color:#fff;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:600;z-index:99999;opacity:0;transform:translateY(20px);transition:all .3s';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  requestAnimationFrame(function() { t.style.opacity = '1'; t.style.transform = 'translateY(0)'; });
+  setTimeout(function() { t.style.opacity = '0'; setTimeout(function() { t.remove(); }, 300); }, 1500);
+}
+
+
+// _optimisticToast('✓ Saving payment...');
+
+// // Add to renderParties() row generation:
+// '<tr onmouseenter="_prefetchParty(\'' + escQ(p.partyID) + '\')" ...>'
+
+
+function _prefetchParty(partyID) {
+  // No-op if already cached in memory
+  if (window._prefetchedParties && window._prefetchedParties[partyID]) return;
+  // Existing data is already in DB — nothing to fetch. Just mark as warm.
+  window._prefetchedParties = window._prefetchedParties || {};
+  window._prefetchedParties[partyID] = true;
+}
+
+
+// Add to app.js — helper for incremental rendering
+function _renderIncremental(tbody, allRows, renderRowFn, batchSize) {
+  var bs = batchSize || 50;
+  var rendered = 0;
+  tbody.innerHTML = '';
+  function renderMore() {
+    var frag = document.createDocumentFragment();
+    var end = Math.min(rendered + bs, allRows.length);
+    for (var i = rendered; i < end; i++) {
+      var tr = renderRowFn(allRows[i], i);
+      frag.appendChild(tr);
+    }
+    tbody.appendChild(frag);
+    rendered = end;
+    if (rendered < allRows.length) {
+      setTimeout(renderMore, 30); // non-blocking
+    }
+  }
+  renderMore();
+}
+
+
+
+      function _reRenderCurrent() {
+        const v = _activeView;
+        // ── Supply views ──────────────────────────────────────
+        if (v === 'dashboard') renderDashboard();
+        if (v === 'todayDue') renderTodayDue();
+        if (v === 'overdue') renderOverdue();
+        if (v === 'parties') renderParties();
+        if (v === 'invoices') renderInvoices();
+        if (v === 'pending') renderPendingSummary();
+        if (v === 'slab15due') renderSlabDue('15');
+        if (v === 'slab1due') renderSlabDue('1');
+        if (v === 'slabNildue') renderSlabDue('Nil');
+        if (v === 'shortpay') renderShortPay();
+        if (v === 'latepay') renderLatePay();
+        if (v === 'payments') renderPayments();
+        if (v === 'followups') renderFollowups();
+        if (v === 'promises') renderPromises();
+        if (v === 'escalations') renderEscalations();
+        if (v === 'discountTBG') { if (!window._canViewDTBG) { Swal.fire('Access Denied','Discount TBG is available for Admin only.','error'); return; } renderDiscountTBG(); }
+        if (v === 'writeoffs') renderWriteOffs();
+        if (v === 'reports') { if (!window._canViewAnalytics) { Swal.fire('Access Denied','Analytics is available for Admin only.','error'); return; } loadReports(); }
+
+        // ── Retail views ──────────────────────────────────────
+        if (v === 'retailDashboard') { if (typeof renderRetailDashboard === 'function') renderRetailDashboard(); }
+        if (v === 'retailSales')     { if (typeof renderRetailSales === 'function') renderRetailSales(); }
+        if (v === 'retailCustomers') { if (typeof renderRetailCustomers === 'function') renderRetailCustomers(); }
+        if (v === 'retailPayments')  { if (typeof renderRetailPayments === 'function') renderRetailPayments(); }
+        if (v === 'retailUpload')    { if (typeof _renderRetailUpload === 'function') _renderRetailUpload(); }
+      }
+
+      const VIEW_TITLES = {
+        dashboard: 'Dashboard', todayDue: "Today's Due", overdue: 'Overdue',
+        parties: 'Parties', addParty: 'Add Party', invoices: 'Sales Invoices',
+        pending: 'Pending Invoices', addInvoice: 'New Invoice', upload: 'CSV Upload',
+        slab15due: '1.5% Slab -- Due Invoices', slab1due: '1% Slab -- Due Invoices',
+        slabNildue: 'Nil Slab -- Due Invoices',
+        shortpay: 'Short Payments', latepay: 'Late Payments',
+        payments: 'Payments', recPayment: 'Record Payment', followups: 'Follow-ups',
+        promises: 'Promise Tracker', escalations: 'Escalations',
+        discountTBG: 'Discount to be Given', writeoffs: 'Write-Offs', reports: 'Reports',
+        // ── Retail views ──────────────────────────────────
+        retailDashboard: 'Retail Dashboard',
+        retailUpload: 'Retail Upload',
+        retailSales: 'Retail Sales',
+        retailCustomers: 'Retail Customers',
+        retailPayments: 'Retail Payments'
+      };
+
+     // ============================================================
+// NAV — Master view router (updated: retail + cache + guards)
+// ============================================================
+
+// Cache: tracks view → lastUpdate hash, skips redundant re-renders
+var _tabRenderCache = {};
+
+function nav(v) {
+  // ── Mobile: close the sidebar drawer automatically ───────
+  if (window.innerWidth <= 768) {
+    var sbEl = document.getElementById('sb');
+    if (sbEl) sbEl.classList.remove('mobile-show');
+    var bd = document.getElementById('sb-backdrop');
+    if (bd) bd.classList.remove('show');
+  }
+
+  // ── Switch active view (hide all, show target) ───────────
+  document.querySelectorAll('.view').forEach(function(el) { el.classList.remove('active'); });
+  var viewEl = document.getElementById('view-' + v);
+  if (viewEl) viewEl.classList.add('active');
+
+  // ── Highlight sidebar item ──────────────────────────────
+  document.querySelectorAll('.sb-nav-item').forEach(function(n) { n.classList.remove('active'); });
+  var navBtn = document.getElementById('nav-' + v);
+  if (navBtn) navBtn.classList.add('active');
+
+  // ── Breadcrumb + state ──────────────────────────────────
+  document.getElementById('tb-crumb').textContent = VIEW_TITLES[v] || v;
+  _activeView = v;
+
+  // ── Cache check: skip re-render if same view + data unchanged ─
+  // (Form views are exempt — they need fresh state every time)
+  var _isFormView = (v === 'addInvoice' || v === 'addParty' || v === 'recPayment');
+  var cacheKey = v + '_' + (_lastUpdate || '0');
+  if (!_isFormView && _tabRenderCache[v] === cacheKey && v !== 'dashboard') {
+    return; // instant — no re-render needed
+  }
+  _tabRenderCache[v] = cacheKey;
+
+  // ── Role-based access guards ────────────────────────────
+  if (v === 'discountTBG' && !window._canViewDTBG) {
+    Swal.fire('Access Denied', 'Discount TBG is available for Admin only.', 'error');
+    return;
+  }
+  if (v === 'reports' && !window._canViewAnalytics) {
+    Swal.fire('Access Denied', 'Analytics is available for Admin only.', 'error');
+    return;
+  }
+  if (v === 'escalations' && !window._isAdmin) {
+    // Escalations is admin-only in sidebar; safe guard
+    // (If you want it accessible to all roles, remove this guard)
+  }
+
+  // ── Render the target view ──────────────────────────────
+  switch (v) {
+
+    // ── Overview ──────────────────────────────────────────
+    case 'dashboard':
+      renderDashboard();
+      if (typeof _refreshRetailOutstanding === 'function') _refreshRetailOutstanding();
+      break;
+
+    case 'todayDue':
+      renderTodayDue();
+      break;
+
+    case 'overdue':
+      renderOverdue();
+      break;
+
+    // ── Parties ───────────────────────────────────────────
+    case 'parties':
+      _populateFilters();
+      renderParties();
+      break;
+
+    // ── Invoices ──────────────────────────────────────────
+    case 'invoices':
+      _populateFilters();
+      renderInvoices();
+      break;
+
+    case 'pending':
+      renderPendingSummary();
+      break;
+
+    case 'addInvoice':
+      _setDefaultDates();
+      resetInvoiceForm();
+      _buildAllPartySS();
+      break;
+
+    case 'upload':
+      // CSV/Invoice upload view has no dynamic render — static
+      break;
+
+    // ── Slab views ────────────────────────────────────────
+    case 'slab15due':
+      renderSlabDue('15');
+      break;
+
+    case 'slab1due':
+      renderSlabDue('1');
+      break;
+
+    case 'slabNildue':
+      renderSlabDue('Nil');
+      break;
+
+    // ── Collections ───────────────────────────────────────
+    case 'shortpay':
+      renderShortPay();
+      break;
+
+    case 'latepay':
+      renderLatePay();
+      break;
+
+    case 'payments':
+      renderPayments();
+      break;
+
+    case 'recPayment':
+      _setDefaultDates();
+      resetPaymentForm();
+      _buildAllPartySS();
+      break;
+
+    // ── Follow-ups ────────────────────────────────────────
+    case 'followups':
+      renderFollowups();
+      break;
+
+    case 'promises':
+      renderPromises();
+      break;
+
+    case 'escalations':
+      renderEscalations();
+      break;
+
+    // ── Adjustments (admin) ───────────────────────────────
+    case 'discountTBG':
+      renderDiscountTBG();
+      break;
+
+    case 'writeoffs':
+      renderWriteOffs();
+      break;
+
+    // ── Reports (admin) ───────────────────────────────────
+    case 'reports':
+      loadReports();
+      break;
+
+    // ── Retail section ────────────────────────────────────
+    case 'retailDashboard':
+      if (typeof renderRetailDashboard === 'function') renderRetailDashboard();
+      break;
+
+    case 'retailUpload':
+      _retailStep = 1;
+      if (_retailData) {
+        _retailData.parsed = null;
+        _retailData.result = null;
+      }
+      if (typeof _renderRetailUpload === 'function') _renderRetailUpload();
+      break;
+
+    case 'retailSales':
+      if (typeof renderRetailSales === 'function') renderRetailSales();
+      break;
+
+    case 'retailCustomers':
+      if (typeof renderRetailCustomers === 'function') renderRetailCustomers();
+      break;
+
+    case 'retailPayments':
+      if (typeof renderRetailPayments === 'function') renderRetailPayments();
+      break;
+
+    case 'retailFollowups':
+      if (typeof renderRetailFollowups === 'function') renderRetailFollowups();
+      break;
+    case 'retailPromises':
+      if (typeof renderRetailPromises === 'function') renderRetailPromises();
+      break;
+    case 'retailEscalations':
+      if (typeof renderRetailEscalations === 'function') renderRetailEscalations();
+      break;
+
+    // ── Add Party form ────────────────────────────────────
+    case 'addParty':
+      resetPartyForm();
+      break;
+
+    // ── Fallback — unknown view ───────────────────────────
+    default:
+      // silent — no action
+      break;
+  }
+}
+
+      function toggleSB() {
+        const sb = document.getElementById('sb');
+        const backdrop = document.getElementById('sb-backdrop');
+        if (window.innerWidth <= 768) {
+          const isOpen = sb.classList.contains('mobile-show');
+          sb.classList.toggle('mobile-show');
+          if (backdrop) backdrop.classList.toggle('show', !isOpen);
+          return;
+        }
+        _sbCollapsed = !_sbCollapsed;
+        sb.classList.toggle('collapsed', _sbCollapsed);
+        const full = document.getElementById('sb-logo-full');
+        const mini = document.getElementById('sb-logo-mini');
+        const chev = document.getElementById('sb-chev');
+        if (full) full.style.display = _sbCollapsed ? 'none' : 'flex';
+        if (mini) mini.style.display = _sbCollapsed ? 'flex' : 'none';
+        if (chev) chev.className = _sbCollapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
+      }
+
+      (function initLogo() {
+        const full = document.getElementById('sb-logo-full');
+        const mini = document.getElementById('sb-logo-mini');
+        if (full) full.style.display = 'none';
+        if (mini) mini.style.display = 'flex';
+      })();
+
+      const INR = n => n == null ? '--' : '₹' + Math.round(n).toLocaleString('en-IN');
+      const txt = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+      const escQ = s => (s || '').replace(/'/g, "\\'");
+      const escHTML = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+      function pending(inv) {
+        // Bill Value is what customer owes (GST inclusive)
+        const payable = inv.billValue || inv.netAmount || 0;
+        const discAlreadyGiven = _discForInvoice(inv.invoiceNo);
+        return Math.max(0, payable - (inv.paidAmount || 0) - (inv.writeOff || 0) - discAlreadyGiven);
+      }
+      function isPaid(inv) { return pending(inv) <= 0 || inv.status === 'Written-Off' || inv.status === 'Paid'; }
+
+      function parseIST(str) {
+        if (!str) return null;
+        const s = str.toString().split(' ')[0].split('/');
+        if (s.length < 3) return null;
+        return new Date(+s[2], +s[1] - 1, +s[0]);
+      }
+
+      function todayStr() {
+        const d = new Date();
+        return String(d.getDate()).padStart(2, '0') + '/' +
+          String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+      }
+      function isToday(dtStr) {
+        if (!dtStr) return false;
+        const raw = dtStr.toString().split(' ')[0].trim();
+        // Handle ISO format: "2025-05-03" -> convert to dd/MM/yyyy
+        if (raw.includes('-')) {
+          const p = raw.split('-');
+          if (p.length === 3) return (p[2].padStart(2,'0') + '/' + p[1].padStart(2,'0') + '/' + p[0]) === todayStr();
+        }
+        return raw === todayStr();
+      }
+
+      function daysOD(inv) {
+        const d = parseIST(inv.dueDate);
+        if (!d) return 0;
+        const t = new Date(); t.setHours(0, 0, 0, 0);
+        return Math.floor((t - d) / 86400000);
+      }
+
+      function slabBadge(s) {
+        if (s === '1.5') return `<span class="slab-15">1.5%</span>`;
+        if (s === '1') return `<span class="slab-1">1%</span>`;
+        return `<span class="slab-0">Nil</span>`;
+      }
+
+      function statusBadge(s) {
+        const m = {
+          'Paid': 'badge-paid', 'Pending': 'badge-pending', 'PartPaid': 'badge-partpaid',
+          'Overdue': 'badge-overdue', 'Disputed': 'badge-disputed', 'Cancelled': 'badge-cancelled'
+        };
+        return `<span class="badge ${m[s] || 'badge-pending'}">${s || 'Pending'}</span>`;
+      }
+
+      function priorityBadge(p) {
+        const m = { 'High': 'badge-high', 'Medium': 'badge-medium', 'Low': 'badge-low' };
+        return `<span class="badge ${m[p] || 'badge-medium'}">${p || 'Medium'}</span>`;
+      }
+
+      function ageBadge(days) {
+        if (days <= 7) return `<span class="overdue-age age-1">${days}d</span>`;
+        if (days <= 15) return `<span class="overdue-age age-2">${days}d</span>`;
+        if (days <= 30) return `<span class="overdue-age age-3">${days}d</span>`;
+        if (days <= 60) return `<span class="overdue-age age-4">${days}d</span>`;
+        return `<span class="overdue-age age-5">${days}d</span>`;
+      }
+
+      function modeIcon(m) {
+        const ic = { 'Phone Call': 'fa-phone', 'WhatsApp': 'fa-comment-dots', 'In Person': 'fa-user-check', 'Email': 'fa-envelope' };
+        return ic[m] || 'fa-comment';
+      }
+
+      function modeBg(m) {
+        const bg = { 'Phone Call': '#E8F0FE;color:#1967D2', 'WhatsApp': '#E6F4EA;color:#137333', 'In Person': '#FCE8E6;color:#EA4335', 'Email': '#F8FAFC;color:#475569' };
+        return bg[m] || '#F8FAFC;color:#475569';
+      }
+
+      function _setDefaultDates() {
+        const today = new Date().toISOString().split('T')[0];
+        const now = new Date().toISOString().slice(0, 16);
+        ['ai-invdate', 'rp-date', 'rpt-date'].forEach(id => { const el = document.getElementById(id); if (el) el.value = today; });
+        const fdt = document.getElementById('fu-dt'); if (fdt) fdt.value = now;
+      }
+
+      function _updateBadges() {
+        if (!DB.stats) return;
+        txt('badge-td', DB.stats.dueTodayCount || 0);
+        txt('badge-od', DB.stats.overdueCount || 0);
+        // All slab/short counts must use same isPaid/_isShortPay logic as their render fns
+        const s15   = (DB.invoices || []).filter(i => !isPaid(i) && i.slabPct === '1.5').length;
+        const s1    = (DB.invoices || []).filter(i => !isPaid(i) && i.slabPct === '1').length;
+        const sNil  = (DB.invoices || []).filter(i => !isPaid(i) && (!i.slabPct || i.slabPct === '0')).length;
+        // Use _isShortPay() — same function used by Short Payments table
+        const sp    = (DB.invoices || []).filter(i => _isShortPay(i)).length;
+        txt('badge-s15',  s15);
+        txt('badge-s1',   s1);
+        txt('badge-sNil', sNil);
+        txt('badge-sp',   sp);
+      }
+
+      function emptyRow(cols, msg) {
+        return `<tr><td colspan="${cols}" class="center" style="padding:28px;color:var(--muted);font-size:12px">${msg || 'No data found'}</td></tr>`;
+      }
+
+      function _populateFilters() {
+        // Searchable party dropdowns — overdue + slab sections
+        const _partyOpts2 = [{value:'',label:'All Parties',sub:''}].concat(
+          (DB.parties||[]).filter(p=>p.status==='Active').map(p=>({value:p.partyID,label:p.name,sub:p.partyCode||''}))
+        );
+        [
+          {id:'od-party-sd', cb: renderOverdue},
+          {id:'s15-party-sd', cb: ()=>renderSlabDue('15')},
+          {id:'s1-party-sd',  cb: ()=>renderSlabDue('1')},
+          {id:'sNil-party-sd',cb: ()=>renderSlabDue('Nil')}
+        ].forEach(function(x) {
+          const el = document.getElementById(x.id);
+          if (!el) return;
+          if (!el._sdInit) { sdInit(x.id, _partyOpts2, x.cb, 'All Parties'); el._sdInit = true; }
+          else { sdSetOptions(x.id, _partyOpts2); }
+        });
+        // Overdue party filter
+        _buildPartyDatalist('od-party-dl');
+        // Slab party filters
+        ['s15','s1','sNil'].forEach(pfx => { _buildPartyDatalist(pfx+'-party-dl'); }); }
+
+      const _ssState = {}; // { wrapperId: { value, text } }
+
+      function buildSS(wid, options, onSelect, placeholder) {
+        const wrap = document.getElementById(wid);
+        if (!wrap) return;
+        wrap.className = 'ss-wrap';
+        wrap.innerHTML = `
+    <input class="ss-input" id="${wid}-inp" readonly placeholder="${placeholder || '-- Select --'}"
+      onfocus="openSS('${wid}')" onclick="openSS('${wid}')" autocomplete="off">
+    <i class="fas fa-chevron-down ss-caret" id="${wid}-caret"></i>
+    <div class="ss-drop" id="${wid}-drop">
+      <div class="ss-search-box" style="position:relative">
+        <i class="fas fa-search ss-search-icon"></i>
+        <input class="ss-search" id="${wid}-q" placeholder="Search..." oninput="filterSS('${wid}')">
+      </div>
+      <div class="ss-list" id="${wid}-list"></div>
+    </div>`;
+        _ssState[wid] = { value: '', text: '', options, onSelect };
+        renderSSList(wid, '');
+        document.addEventListener('click', e => {
+          if (!wrap.contains(e.target)) closeSS(wid);
+        });
+      }
+
+      function openSS(wid) {
+        const drop = document.getElementById(wid + '-drop');
+        const inp = document.getElementById(wid + '-inp');
+        if (!drop) return;
+        drop.classList.add('open');
+        inp.classList.add('open');
+        setTimeout(() => { const q = document.getElementById(wid + '-q'); if (q) { q.value = ''; q.focus(); } }, 50);
+        renderSSList(wid, '');
+      }
+
+      function closeSS(wid) {
+        const drop = document.getElementById(wid + '-drop');
+        const inp = document.getElementById(wid + '-inp');
+        if (drop) drop.classList.remove('open');
+        if (inp) inp.classList.remove('open');
+      }
+
+      function filterSS(wid) {
+        const q = (document.getElementById(wid + '-q') || {}).value || '';
+        renderSSList(wid, q);
+      }
+
+      function renderSSList(wid, q) {
+        const st = _ssState[wid]; if (!st) return;
+        const list = document.getElementById(wid + '-list'); if (!list) return;
+        const lq = q.toLowerCase();
+        const filtered = st.options.filter(o =>
+          !lq || o.name.toLowerCase().includes(lq) ||
+          (o.meta || '').toLowerCase().includes(lq)
+        );
+        if (!filtered.length) {
+          list.innerHTML = '<div class="ss-empty">No results found</div>';
+          return;
+        }
+        list.innerHTML = filtered.map(o =>
+          `<div class="ss-opt" onclick="selectSS('${wid}','${escQ(o.id)}','${escQ(o.name)}')">
+      <div class="ss-name">${o.name}</div>
+      ${o.meta ? `<div class="ss-meta">${o.meta}</div>` : ''}
+    </div>`
+        ).join('');
+      }
+
+      function selectSS(wid, id, name) {
+        const st = _ssState[wid]; if (!st) return;
+        st.value = id; st.text = name;
+        const inp = document.getElementById(wid + '-inp');
+        if (inp) inp.value = name;
+        closeSS(wid);
+        if (typeof st.onSelect === 'function') st.onSelect(id, name);
+      }
+
+      function getSS(wid) { return (_ssState[wid] || {}).value || ''; }
+      function resetSS(wid) {
+        if (_ssState[wid]) { _ssState[wid].value = ''; _ssState[wid].text = ''; }
+        const inp = document.getElementById(wid + '-inp');
+        if (inp) inp.value = '';
+      }
+
+      function renderStars(r) {
+        if (!r || !r.stars) return '';
+        let h = '<div style="display:flex;gap:2px;margin-top:3px" title="Avg Delay: ' + r.delay + ' days">';
+        for (let i = 1; i <= 5; i++) {
+          h += `<i class="fas fa-star" style="font-size:10px;color:${i <= r.stars ? '#FBBF24' : '#E2E8F0'}"></i>`;
+        }
+        h += `<span style="font-size:9px;color:var(--muted);margin-left:4px">${r.label}</span>`;
+        h += '</div>';
+        return h;
+      }
+
+      function _buildAllPartySS() {
+        // Reports filter
+        sdInit('rpt-ss', _partyOptions(true), (v) => { loadReports(); }, 'All Parties');
+        const opts = (DB.parties || []).map(p => ({
+          id: p.partyID, name: p.name,
+          meta: [p.city, p.partyCode, p.head].filter(v => v && v !== '--').join(' | ')
+        }));
+
+        if (document.getElementById('rp-ss')) {
+          buildSS('rp-ss', opts, id => onRPPartyID(id), 'Search party...');
+        }
+        if (document.getElementById('ai-ss')) {
+          buildSS('ai-ss', opts, id => onAIPartyID(id), 'Search party...');
+        }
+        if (document.getElementById('fu-ss')) {
+          buildSS('fu-ss', opts, id => onFUPartyID(id), 'Search party...');
+        }
+        if (document.getElementById('rpt-ss')) {
+          const rptOpts = [{ id: '', name: 'All Parties', meta: '' }].concat(opts);
+          buildSS('rpt-ss', rptOpts, () => loadReports(), 'All Parties');
+        }
+        if (document.getElementById('inv-ss')) {
+          const invOpts = [{ id: '', name: 'All Parties', meta: '' }].concat(opts);
+          buildSS('inv-ss', invOpts, () => { _pState.invoices = 1; renderInvoices(); }, 'All Parties');
+        }
+      }
+
+      function onAIPartyID(partyID) {
+        const p = (DB.parties || []).find(x => x.partyID === partyID);
+        if (!p) return;
+        const s = id => document.getElementById(id);
+        if (s('ai-party-id')) s('ai-party-id').value = p.partyID;
+        if (s('ai-party-code')) s('ai-party-code').value = p.partyCode || '';
+        if (s('ai-party-name')) s('ai-party-name').value = p.name;
+        onAIParty(partyID);
+      }
+
+      function onRPPartyID(partyID) {
+        const p = (DB.parties || []).find(x => x.partyID === partyID);
+        if (!p) return;
+        const s = id => document.getElementById(id);
+        if (s('rp-party-id')) s('rp-party-id').value = p.partyID;
+        if (s('rp-party-code')) s('rp-party-code').value = p.partyCode || '';
+        if (s('rp-party-name')) s('rp-party-name').value = p.name;
+        onRPParty(partyID);
+      }
+
+      function onFUPartyID(partyID) {
+        const p = (DB.parties || []).find(x => x.partyID === partyID);
+        if (!p) return;
+        const s = id => document.getElementById(id);
+        if (s('fu-party-id')) s('fu-party-id').value = p.partyID;
+        if (s('fu-party-code')) s('fu-party-code').value = p.partyCode || '';
+        if (s('fu-party-name')) s('fu-party-name').value = p.name;
+        onFUParty(partyID);
+      }
+
+      function downloadTemplate() {
+        const headers = [
+          'DATE', 'BILL NO.', 'QTY', 'PCS/CASE', 'NAME', 'CITY', 'DESCRIPTION',
+          'BILL VALUE', 'C.GST', 'S.GST', 'I.GST', 'CESS',
+          'EXP1', 'EXP2', 'EXP3', 'EXP4', 'EXP5',
+          '194Q', 'TCS.1H', 'EXP6', 'EXP7', 'EXP8', 'EXP9', 'EXP10',
+          'TCS', 'NET VALUE', 'VEHICLE NO.'
+        ];
+        const sample = [
+          '23-03-2026', 'FRESKO-25393', '42.45', '0',
+          'M.K. Industrial Corporation', 'Mandi Gobindgarh', 'FLAT BAR',
+          '256198', '19541', '19541', '0', '0',
+          '0', '0', '0', '0', '0',
+          '0', '0', '0', '0', '0', '0', '0',
+          '0', '217116', 'HR38AD5167'
+        ];
+        const note = [
+          'dd-mm-yyyy', 'Bill number', 'Optional', 'Optional',
+          'Must match Parties table name', 'Optional', 'Optional',
+          'Gross amount', 'CGST', 'SGST', 'IGST', 'Cess',
+          '', '', '', '', '',
+          '', '', '', '', '', '', '',
+          'TCS', 'Final payable <- used for invoice amount', 'Vehicle number'
+        ];
+        const csv = [headers.join(','), sample.join(','), note.join(',')].join('\n');
+        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'Fresko_Invoice_Template.csv';
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      const ICONS = {
+        followup: 'fa-phone-alt',      // Log Follow-up -- always phone-alt
+        payment: 'fa-indian-rupee-sign',     // Record Payment -- always rupee-sign
+        view: 'fa-eye',            // View detail
+        edit: 'fa-pencil-alt',     // Edit
+        delete: 'fa-trash-alt',      // Delete
+        promise: 'fa-handshake',      // Promise Tracker
+        escalate: 'fa-arrow-up',       // Escalation
+        whatsapp: 'fa-whatsapp',       // WhatsApp
+        call: 'fa-phone',          // Direct call link
+        report: 'fa-chart-bar',      // Reports
+        upload: 'fa-cloud-upload-alt', // Upload
+        download: 'fa-download',       // Download
+        add: 'fa-plus',           // Add/New
+        save: 'fa-save',           // Save form
+        cancel: 'fa-times',          // Cancel/Close
+        refresh: 'fa-sync-alt',       // Refresh
+        check: 'fa-check',          // Confirm/Kept
+        cross: 'fa-times',          // Broken/No
+      };
+
+      function actionBtn(type, onclick, label, extraClass) {
+        const iconMap = {
+          followup: { ic: 'fa-phone-alt', cls: 'btn-amber', tip: 'Log Follow-up' },
+          payment: { ic: 'fa-indian-rupee-sign', cls: 'btn-primary', tip: 'Record Payment' },
+          view: { ic: 'fa-eye', cls: 'btn-ghost', tip: 'View Detail' },
+          kept: { ic: 'fa-check', cls: 'btn-green', tip: 'Mark Kept' },
+          broken: { ic: 'fa-times', cls: 'btn-secondary', tip: 'Mark Broken' },
+        };
+        const m = iconMap[type] || { ic: 'fa-circle', cls: 'btn-ghost', tip: '' };
+        const lbl = label ? ` ${label}` : '';
+        return `<button class="btn btn-sm ${m.cls} ${extraClass || ''}" onclick="${onclick}" title="${m.tip}">
+    <i class="fas ${m.ic}" style="font-size:10px"></i>${lbl}
+  </button>`;
+      }
+
+      function partyAC(inputId, dropId, onSelect) {
+        const inp = document.getElementById(inputId);
+        const drop = document.getElementById(dropId);
+        const val = (inp.value || '').toLowerCase();
+        if (!val) { drop.classList.remove('show'); return; }
+        const matches = (DB.parties || []).filter(p =>
+          p.name.toLowerCase().includes(val) ||
+          (p.partyCode || '').toLowerCase().includes(val) ||
+          (p.city || '').toLowerCase().includes(val)
+        ).slice(0, 12);
+        if (!matches.length) { drop.classList.remove('show'); return; }
+        drop.innerHTML = matches.map(p =>
+          `<div class="ac-item" onclick="acSelect('${escQ(inputId)}','${escQ(dropId)}','${escQ(p.partyID)}','${escQ(p.partyCode)}','${escQ(p.name)}')">
+      <div class="ac-name">${p.name}</div>
+      <div class="ac-sub">${p.city || ''}  ${p.partyCode || ''}  ${p.head || ''}</div>
+    </div>`
+        ).join('');
+        drop.classList.add('show');
+      }
+
+      function acSelect(inputId, dropId, partyID, partyCode, partyName) {
+        document.getElementById(inputId).value = partyName;
+        document.getElementById(dropId).classList.remove('show');
+        const prefix = inputId.replace('-party-inp', '').replace('-inp', '');
+        const setHid = (suf, val) => { const e = document.getElementById(prefix + '-party-' + suf); if (e) e.value = val; };
+        setHid('id', partyID); setHid('code', partyCode); setHid('name', partyName);
+        if (inputId === 'ai-party-inp') onAIParty(partyID);
+        if (inputId === 'rp-party-inp') onRPParty(partyID);
+        if (inputId === 'fu-party-inp') onFUParty(partyID);
+      }
+
+      function renderDashboard() {
+        const s = DB.stats || {};
+        txt('s-outstanding', INR(s.totalOutstanding || 0));
+        txt('s-parties', (s.totalParties || 0) + ' parties');
+        txt('s-overdue', INR(s.totalOverdue || 0));
+        txt('s-overdue-c', (s.overdueCount || 0) + ' invoices');
+        txt('s-today', INR(s.totalDueToday || 0));
+        txt('s-today-c', (s.dueTodayCount || 0) + ' invoices');
+        txt('s-collected', INR(s.collectedThisMonth || 0));
+        txt('s-coll-c', (s.collectedCount || 0) + ' payments');
+
+        let s15 = 0, s1 = 0, s0 = 0, c15 = 0, c1 = 0, c0 = 0;
+        (DB.invoices || []).forEach(inv => {
+          if (isPaid(inv)) return;
+          const p = pending(inv);
+          if (inv.slabPct === '1.5') { s15 += p; c15++; }
+          else if (inv.slabPct === '1') { s1 += p; c1++; }
+          else { s0 += p; c0++; }
+        });
+        txt('slab-15-amt', INR(s15)); txt('slab-15-cnt', c15 + ' invoices');
+        txt('slab-1-amt', INR(s1)); txt('slab-1-cnt', c1 + ' invoices');
+        txt('slab-0-amt', INR(s0)); txt('slab-0-cnt', c0 + ' invoices');
+
+        const odList = (DB.invoices || []).filter(i => !isPaid(i) && daysOD(i) > 0)
+          .sort((a, b) => daysOD(b) - daysOD(a));
+        txt('dash-od-badge', odList.length);
+        const odEl = document.getElementById('dash-overdue-list');
+        odEl.innerHTML = odList.length === 0
+          ? '<div class="empty"><i class="fas fa-check-circle" style="color:var(--green)"></i><p>All clear!</p></div>'
+          : odList.slice(0, 10).map(inv => `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid #F8FAFC;cursor:pointer" onclick="openPartyModal('${escQ(inv.partyID)}')">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:600;truncate:ellipsis;overflow:hidden;white-space:nowrap">${inv.partyName}</div>
+          <div style="font-size:10px;color:var(--muted)">${inv.invoiceNo}  Due ${inv.dueDate}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:12px;font-weight:700;color:var(--red)">${INR(pending(inv))}</div>
+          ${ageBadge(daysOD(inv))}
+        </div>
+      </div>`).join('');
+
+        renderFUPanel();
+      }
+
+      function setFuTab(t) {
+        _fuTab = t;
+        const a = 'font-size:10px;font-weight:700;padding:3px 8px;border-radius:4px;border:none;cursor:pointer';
+        document.getElementById('fu-tab-today').style.cssText = a + (t === 'today' ? ';background:#fff;color:var(--red)' : ';background:transparent;color:var(--muted)');
+        document.getElementById('fu-tab-recent').style.cssText = a + (t === 'recent' ? ';background:#fff;color:var(--red)' : ';background:transparent;color:var(--muted)');
+        renderFUPanel();
+      }
+
+      function renderFUPanel() {
+        const el = document.getElementById('dash-fu-list');
+        const ts = todayStr();
+        const list = _fuTab === 'today'
+          ? (DB.followups || []).filter(f => isToday(f.datetime)).reverse()
+          : [...(DB.followups || [])].reverse().slice(0, 12);
+
+        if (!list.length) {
+          el.innerHTML = `<div class="empty"><i class="fas fa-calendar-check"></i><p>${_fuTab === 'today' ? 'No follow-ups today' : 'No follow-ups logged'}</p><small><button style="color:var(--red);font-weight:600;background:none;border:none;cursor:pointer;font-size:11px" onclick="openFUModal()">+ Log one now</button></small></div>`;
+          return;
+        }
+        el.innerHTML = list.map(f => {
+          const time = (f.datetime || '').split(' ')[1] || '';
+          const bg = modeBg(f.mode);
+          return `<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 14px;border-bottom:1px solid #F8FAFC;cursor:pointer" onclick="openPartyModal('${escQ(f.partyID)}')">
+      <div style="width:28px;height:28px;border-radius:50%;background:${bg.split(';')[0]};display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px">
+        <i class="fas ${modeIcon(f.mode)}" style="font-size:10px;color:${bg.split(':')[1]}"></i>
+      </div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span style="font-size:12px;font-weight:600;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${f.partyName}</span>
+          <span style="font-size:10px;color:var(--muted);font-family:monospace;flex-shrink:0;margin-left:6px">${time}</span>
+        </div>
+        <div style="font-size:11px;color:var(--muted);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-top:1px">${f.notes}</div>
+        ${f.promiseDate ? `<div style="font-size:10px;color:var(--amber);margin-top:2px"><i class="fas fa-calendar-alt" style="margin-right:3px"></i>Promise: ${f.promiseDate}</div>` : ''}
+      </div>
+    </div>`;
+        }).join('');
+      }
+
+      function renderTodayDue() {
+        const ts = todayStr();
+        document.getElementById('td-date').textContent = new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+        const dueToday = (DB.invoices || []).filter(i => !isPaid(i) && i.dueDate === ts);
+        const overdueAll = (DB.invoices || []).filter(i => !isPaid(i) && daysOD(i) > 0);
+        const fuToday = (DB.followups || []).filter(f => isToday(f.datetime));
+
+        const dtAmt = dueToday.reduce((s, i) => s + pending(i), 0);
+        const odAmt = overdueAll.reduce((s, i) => s + pending(i), 0);
+
+        txt('td-amt', INR(dtAmt)); txt('td-cnt', dueToday.length + ' invoices');
+        txt('td-od-amt', INR(odAmt)); txt('td-od-cnt', overdueAll.length + ' invoices');
+        txt('td-fu-cnt', fuToday.length);
+        txt('td-badge', dueToday.length);
+
+        const tdEl = document.getElementById('td-invoice-list');
+        tdEl.innerHTML = dueToday.length === 0
+          ? '<div class="empty"><i class="fas fa-check-circle" style="color:var(--green)"></i><p>No bills due today</p></div>'
+          : dueToday.map(inv => `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid #F8FAFC">
+        <div style="flex:1;min-width:0;cursor:pointer" onclick="openPartyModal('${escQ(inv.partyID)}')">
+          <div style="font-size:12px;font-weight:600">${inv.partyName}</div>
+          <div style="font-size:10px;color:var(--muted)">${inv.invoiceNo}  Net ${INR(inv.netAmount)}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:13px;font-weight:700;color:var(--amber)">${INR(pending(inv))}</div>
+          ${slabBadge(inv.slabPct)}
+        </div>
+        <div style="display:flex;gap:6px;justify-content:flex-end">
+          <button class="act-btn ab-edit admin-only" onclick="openEditInvoiceModal('${escQ(inv.invoiceID)}')" title="Edit Invoice"><i class="fas fa-edit"></i></button>
+          <button class="act-btn ab-fu" onclick="openFUModalForParty('${escQ(inv.partyID)}','${escQ(inv.invoiceNo)}')" title="Log Follow-up"><i class="fas fa-phone-alt"></i></button>
+          <button class="act-btn ab-pay" onclick="openRPModalForParty('${escQ(inv.partyID)}')" title="Record Payment"><i class="fas fa-indian-rupee-sign"></i></button>
+        </div>
+      </div>`).join('');
+
+        const fuEl = document.getElementById('td-fu-list');
+        fuEl.innerHTML = fuToday.length === 0
+          ? `<div class="empty"><i class="fas fa-phone-slash"></i><p>No follow-ups logged today</p><small><button style="color:var(--red);font-weight:600;background:none;border:none;cursor:pointer" onclick="openFUModal()">+ Log one</button></small></div>`
+          : fuToday.reverse().map(f => {
+            const bg = modeBg(f.mode);
+            return `<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 14px;border-bottom:1px solid #F8FAFC">
+          <div style="width:28px;height:28px;border-radius:50%;background:${bg.split(';')[0]};display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <i class="fas ${modeIcon(f.mode)}" style="font-size:10px;color:${bg.split(':')[1]}"></i>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;justify-content:space-between">
+              <span style="font-size:12px;font-weight:600">${f.partyName}</span>
+              <span style="font-size:10px;color:var(--muted);font-family:monospace">${(f.datetime || '').split(' ')[1] || ''}</span>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${f.notes}</div>
+            ${f.promiseDate ? `<div style="font-size:10px;color:var(--amber);margin-top:2px">Promise: ${INR(f.promiseAmt)} by ${f.promiseDate}</div>` : ''}
+          </div>
+        </div>`;
+          }).join('');
+      }
+
+      function renderOverdue() {
+        const q = ((document.getElementById('od-search')||{}).value||'').toLowerCase();
+        const pfInp = (document.getElementById('od-party-filter-inp')||{}).value||'';
+        const pf = pfInp ? ((DB.parties||[]).find(p=>p.name.toLowerCase()===pfInp.toLowerCase().trim())||{}).partyID||'' : '';
+        const overdue = (DB.invoices || []).filter(i => {
+          if (isPaid(i) || daysOD(i) <= 0) return false;
+          if (pf && i.partyID !== pf) return false;
+          if (q && !i.partyName.toLowerCase().includes(q) && !i.invoiceNo.toLowerCase().includes(q)) return false;
+          return true;
+        }).sort((a, b) => daysOD(b) - daysOD(a));
+
+        const totalAmt = overdue.reduce((s, i) => s + pending(i), 0);
+        txt('od-total-badge', INR(totalAmt) + ' overdue');
+
+        let b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0;
+        overdue.forEach(i => {
+          const d = daysOD(i), p = pending(i);
+          if (d <= 7) b1 += p; else if (d <= 15) b2 += p; else if (d <= 30) b3 += p; else if (d <= 60) b4 += p; else b5 += p;
+        });
+        txt('od-b1', INR(b1)); txt('od-b2', INR(b2)); txt('od-b3', INR(b3)); txt('od-b4', INR(b4)); txt('od-b5', INR(b5));
+
+        const lastFU = {};
+        (DB.followups || []).forEach(f => {
+          if (!lastFU[f.partyID] || f.datetime > lastFU[f.partyID].datetime)
+            lastFU[f.partyID] = f;
+        });
+
+        const tbody = document.getElementById('od-tbody');
+        tbody.innerHTML = overdue.length === 0
+          ? emptyRow(8, '[OK] No overdue invoices')
+          : overdue.map(inv => {
+            const days = daysOD(inv);
+            const lfu = lastFU[inv.partyID];
+            return `<tr style="cursor:pointer" onclick="openPartyModal('${escQ(inv.partyID)}')">
+          <td><span style="font-weight:600">${inv.partyName}</span></td>
+          <td style="font-family:monospace;font-size:11px">${inv.invoiceNo}</td>
+          <td style="font-size:11px">${inv.dueDate}</td>
+          <td class="center">${ageBadge(days)}</td>
+          <td class="num" style="color:var(--red);font-weight:700">${INR(pending(inv))}</td>
+          <td style="font-size:11px;color:var(--muted)">${lfu ? (lfu.datetime || '').split(' ')[0] + '  ' + lfu.mode : '--'}</td>
+          <td class="center">${priorityBadge(lfu ? lfu.priority : 'High')}</td>
+          <td onclick="event.stopPropagation()" style="white-space:nowrap;text-align:right">
+            <button class="act-btn ab-edit admin-only" onclick="openEditInvoiceModal('${escQ(inv.invoiceID)}')" title="Edit Invoice"><i class="fas fa-edit"></i></button>
+            <button class="act-btn ab-fu" onclick="openFUModalForParty('${escQ(inv.partyID)}','${escQ(inv.invoiceNo)}')" title="Log Follow-up"><i class="fas fa-phone-alt"></i></button>
+            <button class="act-btn ab-pay" onclick="openRPModalForParty('${escQ(inv.partyID)}')" title="Record Payment"><i class="fas fa-indian-rupee-sign"></i></button>
+          </td>
+        </tr>`;
+          }).join('');
+      }
+
+      let _partyFilter = 'ALL';
+      function setPartyFilter(el, f) {
+        document.querySelectorAll('#view-parties .fpill').forEach(e => e.classList.remove('active'));
+        if (el) el.classList.add('active');
+        _partyFilter = f; _pState.parties = 1; renderParties();
+      }
+      function setPartyFilterDrop(f) {
+        _partyFilter = f || 'ALL'; _pState.parties = 1; renderParties();
+      }
+      function _updatePager(prefix, page, total) {
+        const totalPages = Math.max(1, Math.ceil(total / PER));
+        const prev = document.getElementById(prefix + '-prev');
+        const next = document.getElementById(prefix + '-next');
+        const pg = document.getElementById(prefix + '-page');
+        if (prev) prev.disabled = page <= 1;
+        if (next) next.disabled = page >= totalPages;
+        if (pg) pg.textContent = page + ' / ' + totalPages;
+      }
+
+      function partyPage(d) {
+        const total = _filtered.parties.length;
+        _pState.parties = Math.max(1, Math.min(_pState.parties + d, Math.ceil(total / PER)));
+        renderParties();
+      }
+      function invPage(d) {
+        const total = _filtered.invoices.length;
+        _pState.invoices = Math.max(1, Math.min(_pState.invoices + d, Math.ceil(total / PER)));
+        renderInvoices();
+      }
+      function payPage(d) {
+        const total = _filtered.payments.length;
+        _pState.payments = Math.max(1, Math.min(_pState.payments + d, Math.ceil(total / PER)));
+        renderPayments();
+      }
+      function fuPage(d) {
+        const total = _filtered.followups.length;
+        _pState.followups = Math.max(1, Math.min(_pState.followups + d, Math.ceil(total / PER)));
+        renderFollowups();
+      }
+
+      function renderParties() {
+        const search = (document.getElementById('party-search') || {}).value || '';
+        const q = search.toLowerCase();
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+
+        let list = (DB.parties || []).filter(p => {
+          if (_partyFilter === '15') return p.days15 != null;
+          if (_partyFilter === '1') return p.days1 != null && p.days15 == null;
+          if (_partyFilter === 'nil') return p.days15 == null && p.days1 == null;
+          if (_partyFilter === 'A') return p.category === 'A';
+          if (_partyFilter === 'overdue') {
+            return (DB.invoices || []).some(i => i.partyID === p.partyID && !isPaid(i) && daysOD(i) > 0);
+          }
+          if (_partyFilter === 'r5') return p.rating && p.rating.stars === 5;
+          if (_partyFilter === 'r4') return p.rating && p.rating.stars === 4;
+          if (_partyFilter === 'r3') return p.rating && p.rating.stars === 3;
+          if (_partyFilter === 'r12') return p.rating && p.rating.stars <= 2;
+          return true;
+        }).filter(p =>
+          !q || p.name.toLowerCase().includes(q) ||
+          (p.partyCode || '').toLowerCase().includes(q) ||
+          (p.city || '').toLowerCase().includes(q)
+        );
+
+        _filtered.parties = list;
+        const total = list.length;
+        const page = list.slice((_pState.parties - 1) * PER, _pState.parties * PER);
+
+        txt('parties-sub', total + ' parties found');
+        const selEl = document.getElementById('party-filter-sel');
+        if (selEl && selEl.value !== _partyFilter) selEl.value = _partyFilter;
+        const cntEl = document.getElementById('party-filter-count');
+        if (cntEl) cntEl.textContent = _partyFilter !== 'ALL' ? total + ' found' : '';
+        txt('parties-info', `${((_pState.parties - 1) * PER) + 1}-${Math.min(_pState.parties * PER, total)} of ${total} parties`);
+        _updatePager('parties', _pState.parties, total);
+
+        const tbody = document.getElementById('parties-tbody');
+        tbody.innerHTML = page.length === 0 ? emptyRow(7, 'No parties found') :
+          page.map(p => {
+            const out = (DB.invoices || []).filter(i => i.partyID === p.partyID && !isPaid(i)).reduce((s, i) => s + pending(i), 0);
+            const isOD = (DB.invoices || []).some(i => i.partyID === p.partyID && !isPaid(i) && daysOD(i) > 0);
+            const slab = p.days15 ? '1.5%' : p.days1 ? '1%' : 'Nil';
+            const slabC = p.days15 ? 'slab-15' : p.days1 ? 'slab-1' : 'slab-0';
+            return `<tr style="cursor:pointer" onclick="openPartyModal('${escQ(p.partyID)}')">
+        <td>
+          <div style="font-weight:600;font-size:12px">${p.name}</div>
+          <div style="font-size:10px;color:var(--muted)">${p.partyCode || ''}${p.contact ? '  ' + p.contact : ''}</div>
+          ${renderStars(p.rating)}
+        </td>
+        <td style="font-size:11px">${p.city || '--'}</td>
+        <td style="font-size:11px">${p.head || '--'}</td>
+        <td><span class="${slabC}">${slab}</span></td>
+        <td class="num" style="${out > 0 && isOD ? 'color:var(--red);font-weight:700' : 'font-weight:600'}">${INR(out)}</td>
+        <td><span class="badge ${p.status === 'Active' ? 'badge-active' : 'badge-inactive'}">${p.status || 'Active'}</span></td>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap;text-align:right">
+          ${p.phone ? `<a href="tel:${p.phone}" class="act-btn ab-call" style="text-decoration:none" title="Call"><i class="fas fa-phone"></i></a>` : ''}
+          ${p.phone ? `<a href="https://wa.me/91${p.phone.replace(/\D/g, '')}" target="_blank" class="act-btn ab-wa" title="WhatsApp"><i class="fab fa-whatsapp"></i></a>` : ''}
+          <button class="act-btn ab-edit admin-only" onclick="openEditPartyModal('${escQ(p.partyID)}')" title="Edit Party"><i class="fas fa-edit"></i></button>
+          <button class="act-btn ab-fu" onclick="openFUModalForParty('${escQ(p.partyID)}','')" title="Log Follow-up"><i class="fas fa-phone-alt"></i></button>
+          <button class="act-btn ab-pay" onclick="openRPModalForParty('${escQ(p.partyID)}')" title="Record Payment"><i class="fas fa-indian-rupee-sign"></i></button>
+        </td>
+      </tr>`;
+          }).join('');
+      }
+
+      let _invFilter = 'ALL';
+      function setInvFilter(el, f) {
+        document.querySelectorAll('#view-invoices .fpill').forEach(e => e.classList.remove('active'));
+        el.classList.add('active');
+        _invFilter = f; _pState.invoices = 1; renderInvoices();
+      }
+
+      function renderInvoices() {
+        const q = ((document.getElementById('inv-search') || {}).value || '').toLowerCase();
+        const pf = (_ssState['inv-ss'] && _ssState['inv-ss'].value) || '';
+        const from = (document.getElementById('inv-from') || {}).value || '';
+        const to = (document.getElementById('inv-to') || {}).value || '';
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+
+        let list = (DB.invoices || []).filter(inv => {
+          if (_invFilter === 'Pending') return inv.status === 'Pending';
+          if (_invFilter === 'PartPaid') return inv.status === 'PartPaid';
+          if (_invFilter === 'Overdue') return !isPaid(inv) && daysOD(inv) > 0;
+          if (_invFilter === 'Paid') return isPaid(inv);
+          return true;
+        }).filter(inv => {
+          const d = parseIST(inv.invoiceDate);
+          if (from && d && d < new Date(from)) return false;
+          if (to && d && d > new Date(to + 'T23:59:59')) return false;
+          return (!q || inv.invoiceNo.toLowerCase().includes(q) || inv.partyName.toLowerCase().includes(q)) &&
+            (!pf || inv.partyID === pf);
+        }).sort((a, b) => (parseIST(b.invoiceDate) || 0) - (parseIST(a.invoiceDate) || 0));
+
+        _filtered.invoices = list;
+        const total = list.length;
+        const page = list.slice((_pState.invoices - 1) * PER, _pState.invoices * PER);
+        const tbody = document.getElementById('inv-tbody');
+
+        txt('inv-sub', total + ' invoices');
+        txt('inv-info', `${((_pState.invoices - 1) * PER) + 1}-${Math.min(_pState.invoices * PER, total)} of ${total} invoices`);
+        _updatePager('inv', _pState.invoices, total);
+
+        if (!tbody) return;
+        tbody.innerHTML = page.length === 0 ? emptyRow(11, 'No invoices found') :
+          page.map(inv => {
+            const pend = pending(inv);
+            const od = daysOD(inv);
+            const sts = isPaid(inv) ? 'Paid' : od > 0 ? 'Overdue' : (inv.paidAmount > 0 ? 'PartPaid' : 'Pending');
+            return `<tr>
+        <td style="font-family:monospace;font-size:11px;font-weight:600">${inv.invoiceNo}</td>
+        <td style="cursor:pointer" onclick="openPartyModal('${escQ(inv.partyID)}')">
+          <div style="font-size:12px;font-weight:600">${inv.partyName}</div>
+          <div style="font-size:10px;color:var(--muted)">${inv.partyCode || ''}</div>
+        </td>
+        <td style="font-size:11px">${inv.invoiceDate}</td>
+        <td style="font-size:11px${od > 0 ? ' ;font-weight:700;color:var(--red)' : ''}">${inv.dueDate}${od > 0 ? ' ' + ageBadge(od) : ''}</td>
+        <td>${slabBadge(inv.slabPct)}</td>
+        <td class="num">${INR(inv.billValue)}</td>
+        <td class="num" style="${(inv.difference||0)!==0?'color:var(--red);font-weight:700':'color:var(--muted)'}">${(inv.difference||0)!==0?INR(inv.difference):'--'}</td>
+        <td class="num" style="color:var(--green)">${INR(inv.paidAmount)}</td>
+        <td class="num" style="${pend > 0 ? 'color:var(--red);font-weight:700' : 'color:var(--muted)'}">${pend > 0 ? INR(pend) : '--'}</td>
+        <td>${statusBadge(sts)}</td>
+        <td style="white-space:nowrap;text-align:right">
+          <button class="act-btn ab-view" onclick="openPartyModal('${escQ(inv.partyID)}')" title="View Party"><i class="fas fa-eye"></i></button>
+          <button class="act-btn ab-edit admin-only" onclick="openEditInvoiceModal('${escQ(inv.invoiceID)}')" title="Edit Invoice"><i class="fas fa-edit"></i></button>
+          ${!isPaid(inv) ? `<button class="act-btn ab-fu" onclick="openFUModalForParty('${escQ(inv.partyID)}','${escQ(inv.invoiceNo)}')" title="Log Follow-up"><i class="fas fa-phone-alt"></i></button>` : ''}
+          ${!isPaid(inv) ? `<button class="act-btn ab-pay" onclick="openRPModalForParty('${escQ(inv.partyID)}')" title="Record Payment"><i class="fas fa-indian-rupee-sign"></i></button>` : ''}
+        </td>
+      </tr>`;
+          }).join('');
+      }
+
+      function renderPendingSummary() {
+        if (!DB || !DB.invoices) { txt('pi-sub', 'Loading...'); return; }
+        const q = ((document.getElementById('pi-search')||{}).value||'').toLowerCase();
+        const invoices = (DB.invoices || []).filter(inv => {
+          if (isPaid(inv)) return false;
+          if (q && !inv.partyName.toLowerCase().includes(q) && !inv.invoiceNo.toLowerCase().includes(q)) return false;
+          return true;
+        });
+        const grouped = {};
+        invoices.forEach(inv => {
+          if (!grouped[inv.partyID]) {
+            grouped[inv.partyID] = {
+              partyName: inv.partyName,
+              partyID: inv.partyID,
+              count: 0,
+              totalBillValue: 0,
+              totalPending: 0,
+              oldestDate: null
+            };
+          }
+          const g = grouped[inv.partyID];
+          g.count++;
+          g.totalBillValue += inv.billValue;
+          g.totalPending += pending(inv);
+          const d = parseIST(inv.dueDate);
+          if (!g.oldestDate || (d && d < g.oldestDate)) g.oldestDate = d;
+        });
+
+        const list = Object.values(grouped).sort((a, b) => b.totalPending - a.totalPending);
+        const totalPendingAmt = list.reduce((s, g) => s + g.totalPending, 0);
+        txt('pi-sub', list.length + ' parties — ' + INR(totalPendingAmt) + ' total pending');
+        const tbody = document.getElementById('inv-pending-summary-tbody');
+        if (!tbody) return;
+
+        tbody.innerHTML = list.length === 0 ? emptyRow(6, 'No pending invoices') :
+          list.map(g => {
+            const dateStr = g.oldestDate ? (d => String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear())(g.oldestDate) : '--';
+            const od = g.oldestDate ? Math.floor((new Date() - g.oldestDate) / 86400000) : 0;
+            return `<tr>
+              <td style="font-weight:600;cursor:pointer" onclick="openPartyModal('${escQ(g.partyID)}')">${g.partyName}</td>
+              <td class="num">${g.count} bills</td>
+              <td class="num">${INR(g.totalBillValue)}</td>
+              <td class="num" style="color:var(--red);font-weight:800">${INR(g.totalPending)}</td>
+              <td>${dateStr} ${od > 0 ? ageBadge(od) : ''}</td>
+              <td style="white-space:nowrap;text-align:right">
+                <button class="act-btn ab-fu" onclick="openFUModalForParty('${escQ(g.partyID)}','')" title="Log Follow-up"><i class="fas fa-phone-alt"></i></button>
+                <button class="act-btn ab-pay" onclick="openRPModalForParty('${escQ(g.partyID)}')" title="Record Payment"><i class="fas fa-indian-rupee-sign"></i></button>
+              </td>
+            </tr>`;
+          }).join('');
+      }
+
+      let _paySort = { col: 'date', dir: -1 };
+      let _payExpanded = {};
+      function setPaySort(col) {
+        if (_paySort.col === col) _paySort.dir *= -1; else { _paySort.col = col; _paySort.dir = -1; }
+        _payExpanded = {}; // reset so new sort order starts fresh (all open)
+        renderPayments();
+      }
+      function togglePayGroup(idx) {
+        const isOpen = _payExpanded[idx] !== false; // undefined/true = open, false = closed
+        _payExpanded[idx] = !isOpen;                // toggle
+        renderPayments();
+      }
+      function toggleLPGroup(tr) {
+        if (!window._lpExpanded) window._lpExpanded = {};
+        const idx = +tr.dataset.idx;
+        const isOpen = tr.dataset.isopen === '1';
+        window._lpExpanded[idx] = !isOpen;
+        renderLatePay();
+      }
+
+      // ── Collapse / Expand All — Payments ──────────────────────────────
+      function collapseAllPay() {
+        const hdrs = document.querySelectorAll('.pay-group-hdr');
+        hdrs.forEach(tr => { _payExpanded[+tr.dataset.idx] = false; });
+        renderPayments();
+      }
+      function expandAllPay() {
+        _payExpanded = {}; // undefined = open (default)
+        renderPayments();
+      }
+
+      // ── Collapse / Expand All — Late Payments ─────────────────────────
+      function collapseAllLP() {
+        if (!window._lpExpanded) window._lpExpanded = {};
+        const hdrs = document.querySelectorAll('.lp-group-hdr');
+        hdrs.forEach(tr => { window._lpExpanded[+tr.dataset.idx] = false; });
+        renderLatePay();
+      }
+      function expandAllLP() {
+        window._lpExpanded = {}; // undefined = open (default)
+        renderLatePay();
+      }
+      // Payment group clicks handled via direct onclick on tr
+      function _paySortIcon(col) {
+        if (_paySort.col !== col) return ' <i class="fas fa-sort" style="opacity:.25;font-size:9px"></i>';
+        return _paySort.dir === -1
+          ? ' <i class="fas fa-sort-down" style="font-size:9px;color:var(--red)"></i>'
+          : ' <i class="fas fa-sort-up" style="font-size:9px;color:var(--red)"></i>';
+      }
+      function renderPayments() {
+        const q   = ((document.getElementById('pay-search')||{}).value||'').toLowerCase();
+        const mf  = ((document.getElementById('pay-mode-filter')||{}).value||'');
+        const from= ((document.getElementById('pay-from')||{}).value||'');
+        const to  = ((document.getElementById('pay-to')||{}).value||'');
+
+        let list = (DB.payments||[]).filter(p => {
+          const d = parseIST(p.paymentDate);
+          if (!d) return false;
+          if (from && d < new Date(from)) return false;
+          if (to   && d > new Date(to+'T23:59:59')) return false;
+          if (mf   && p.mode !== mf) return false;
+          if (q    && !p.partyName.toLowerCase().includes(q) && !(p.refNo||'').toLowerCase().includes(q)) return false;
+          return true;
+        });
+
+        // Group by party
+        const gMap = {};
+        list.forEach(p => {
+          if (!gMap[p.partyID]) gMap[p.partyID] = { partyName: p.partyName, partyID: p.partyID, total: 0, latestDate: null, items: [] };
+          gMap[p.partyID].total += p.amount;
+          const d = parseIST(p.paymentDate);
+          if (!gMap[p.partyID].latestDate || (d && d > gMap[p.partyID].latestDate)) gMap[p.partyID].latestDate = d;
+          gMap[p.partyID].items.push(p);
+        });
+
+        let groups = Object.values(gMap);
+        // Sort groups
+        groups.sort((a, b) => {
+          if (_paySort.col === 'party') return a.partyName.localeCompare(b.partyName) * _paySort.dir;
+          if (_paySort.col === 'amt')   return (b.total - a.total) * _paySort.dir;
+          // date: sort by latest payment date
+          const ad = a.latestDate ? a.latestDate.getTime() : 0;
+          const bd = b.latestDate ? b.latestDate.getTime() : 0;
+          return (bd - ad) * _paySort.dir;
+        });
+
+        txt('pay-sub', list.length + ' payments across ' + groups.length + ' parties');
+        txt('pay-info', list.length + ' total');
+        _updatePager('pay', 1, 1);
+
+        // Sortable header
+        const thead = document.getElementById('pay-thead');
+        if (thead) thead.innerHTML = '<tr>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;party&quot;)">Party' + _paySortIcon('party') + '</th>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;date&quot;)">Date' + _paySortIcon('date') + '</th>' + '<th>Mode</th><th>Ref No</th>' + '<th class="num" style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;amt&quot;)">Amount' + _paySortIcon('amt') + '</th>' + '<th>Applied To</th><th>By</th><th class="admin-only">Edit</th></tr>';
+
+        const tbody = document.getElementById('pay-tbody');
+        if (!tbody) return;
+        if (!groups.length) { tbody.innerHTML = emptyRow(8, 'No payments found'); return; }
+
+        // Use index as key to avoid partyID escaping issues
+        tbody.innerHTML = groups.map((g, idx) => {
+          const isOpen = _payExpanded[idx] !== false; // default open, keyed by index
+          const detailRows = g.items.map(p =>
+            '<tr class="pay-det" style="font-size:11px">' +
+            '<td style="padding-left:22px">' + escHTML(p.partyName) + '</td>' +
+            '<td style="font-size:11px">' + p.paymentDate + '</td>' +
+            '<td><span class="badge badge-pending" style="background:#E8F0FE;font-size:10px">' + p.mode + '</span></td>' +
+            '<td style="color:var(--muted);font-size:11px">' + (p.refNo||'--') + '</td>' +
+            '<td class="num" style="color:var(--green);font-weight:700">' + INR(p.amount) + '</td>' +
+            '<td style="color:var(--muted);font-size:10px;max-width:110px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + (p.appliedTo||'--') + '</td>' +
+            '<td style="color:var(--muted);font-size:10px">' + (p.recordedBy||'--') + '</td>' +
+            '<td class="admin-only"><button class="act-btn ab-edit" onclick="openEditPaymentModal(\'' + escQ(p.paymentID) + '\')" title="Edit Payment"><i class="fas fa-edit"></i></button></td>' +
+            '</tr>'
+          ).join('');
+          return '<tr class="pay-group-hdr" data-idx="' + idx + '" style="background:#F8FAFC;cursor:pointer" onclick="togglePayGroup(+this.dataset.idx)">' +
+            '<td colspan="4" style="font-weight:700;padding:9px 12px">' +
+            '<i class="fas fa-chevron-' + (isOpen?'down':'right') + '" style="font-size:9px;color:var(--muted);margin-right:6px"></i>' +
+            escHTML(g.partyName) +
+            ' <span style="font-weight:400;color:var(--muted);font-size:11px">(' + g.items.length + ' payment' + (g.items.length>1?'s':'') + ')</span>' +
+            '</td>' +
+            '<td class="num" style="font-weight:800;color:var(--green)">' + INR(g.total) + '</td>' +
+            '<td colspan="3"></td></tr>' +
+            (isOpen ? detailRows : '');
+        }).join('');
+      }
+
+      let _pState_slab = { '15': 1, '1': 1, 'Nil': 1 };
+
+      function slabPage(slab, d) {
+        const key = slab === '15' ? '15' : slab === '1' ? '1' : 'Nil';
+        const slabPct = key === '15' ? '1.5' : key === '1' ? '1' : '0';
+        const filterFn = key === 'Nil'
+          ? i => !isPaid(i) && (!i.slabPct || i.slabPct === '0')
+          : i => !isPaid(i) && i.slabPct === slabPct;
+        const total = (DB.invoices || []).filter(filterFn).length;
+        _pState_slab[key] = Math.max(1, Math.min(_pState_slab[key] + d, Math.ceil(total / PER)));
+        renderSlabDue(slab);
+      }
+
+      function calcExpected(inv) {
+        // ALL calculations based on Bill Value (billValue), not netAmount
+        const billVal = inv.billValue || inv.netAmount || 0;
+        const tds = inv.tcs || 0;
+        // Calculate all 3 slab discounts for display
+        const disc15 = Math.round(billVal * 0.015);
+        const disc1  = Math.round(billVal * 0.01);
+        const discNil = 0;
+        // Actual slab discount based on party's slab
+        const pct  = inv.slabPct === '1.5' ? 0.015 : inv.slabPct === '1' ? 0.01 : 0;
+        const disc = inv.slabPct === '1.5' ? disc15 : inv.slabPct === '1' ? disc1 : discNil;
+        const expected = Math.max(0, billVal - tds - disc);
+        // Expected amounts at each slab (for display reference)
+        const exp15  = Math.max(0, billVal - tds - disc15);
+        const exp1   = Math.max(0, billVal - tds - disc1);
+        const expNil = Math.max(0, billVal - tds);
+        return { netVal: billVal, billVal, tds, disc, disc15, disc1, discNil,
+                 expected, exp15, exp1, expNil, pct };
+      }
+
+      function renderSlabDue(slab) {
+        const isNil = slab === 'Nil';
+        const key = slab === '15' ? '15' : slab === '1' ? '1' : 'Nil';
+        const slabPct = key === '15' ? '1.5' : key === '1' ? '1' : '0';
+        const prefix = isNil ? 'sNil' : 's' + key;
+
+        const list = (DB.invoices || [])
+          .filter(i => {
+            const matchSlab = isNil
+              ? (!isPaid(i) && (!i.slabPct || i.slabPct === '0'))
+              : (!isPaid(i) && i.slabPct === slabPct);
+            if (!matchSlab) return false;
+            const fromEl = document.getElementById(prefix + '-from');
+            const toEl = document.getElementById(prefix + '-to');
+            const partyInpEl = document.getElementById(prefix + '-party-inp');
+            const partyInpVal = partyInpEl ? partyInpEl.value.trim() : '';
+            const partyEl = null; // replaced by text input
+            const from = fromEl ? fromEl.value : '';
+            const to = toEl ? toEl.value : '';
+            const pf = partyInpVal ? ((DB.parties||[]).find(p=>p.name.toLowerCase()===partyInpVal.toLowerCase())||{}).partyID||'' : '';
+            if (pf && i.partyID !== pf) return false;
+            if (from || to) {
+              const d = parseIST(i.invoiceDate);
+              if (from && d && d < new Date(from)) return false;
+              if (to && d && d > new Date(to + 'T23:59:59')) return false;
+            }
+            return true;
+          })
+          .sort((a, b) => (parseIST(a.dueDate) || 0) - (parseIST(b.dueDate) || 0));
+
+        const totalExpected = list.reduce((s, i) => s + calcExpected(i).expected, 0);
+        txt(prefix + '-sub', list.length + ' pending invoices');
+        const badge = document.getElementById(prefix + '-total-badge');
+        if (badge) badge.textContent = INR(totalExpected) + (isNil ? ' due' : ' expected');
+
+        const total = list.length;
+        const pg = _pState_slab[key];
+        const page = list.slice((pg - 1) * PER, pg * PER);
+
+        txt(prefix + '-info', `${((pg - 1) * PER) + 1}-${Math.min(pg * PER, total)} of ${total} invoices`);
+        _updatePager(prefix, pg, total);
+
+        const tbody = document.getElementById(prefix + '-tbody');
+        if (!tbody) return;
+
+        const accentColor = key === '15' ? '#34A853' : key === '1' ? '#F9AB00' : '#475569';
+
+        tbody.innerHTML = page.length === 0
+          ? emptyRow(isNil ? 9 : 10, 'No pending invoices for this slab')
+          : page.map(inv => {
+            const { netVal, billVal, tds, disc, expected, exp15, exp1, expNil } = calcExpected(inv);
+            const od = daysOD(inv);
+            const sts = od > 0 ? 'Overdue' : inv.paidAmount > 0 ? 'PartPaid' : 'Pending';
+            return `<tr>
+          <td style="font-family:monospace;font-size:11px;font-weight:600">${inv.invoiceNo}</td>
+          <td style="cursor:pointer;font-size:12px;font-weight:600" onclick="openPartyModal('${escQ(inv.partyID)}')">${inv.partyName}</td>
+          <td style="font-size:11px">${inv.invoiceDate}</td>
+          <td style="font-size:11px${od > 0 ? ';color:var(--red);font-weight:700' : ''}">${inv.dueDate}${od > 0 ? ' ' + ageBadge(od) : ''}</td>
+          <td class="num">${INR(netVal)}</td>
+          <td class="num" style="color:var(--muted)">${tds > 0 ? '- ' + INR(tds) : '--'}</td>
+          ${!isNil ? `<td class="num" style="color:${accentColor}">${disc > 0 ? '- ' + INR(disc) : '--'}</td>` : ''}
+          <td class="num" style="padding:6px 8px"><div style="font-weight:800;font-size:13px;color:${accentColor}">${INR(expected)}</div><div style="font-size:10px;margin-top:3px;line-height:1.6"><div style="color:#1E8E3E;font-weight:600"><span style="background:#E6F4EA;border-radius:3px;padding:0 4px">1.5%</span> ${INR(exp15)}</div><div style="color:#F9AB00;font-weight:600"><span style="background:#FEF7E0;border-radius:3px;padding:0 4px">1%</span> ${INR(exp1)}</div><div style="color:#6B7280;font-weight:600"><span style="background:#F9FAFB;border-radius:3px;padding:0 4px">Nil</span> ${INR(expNil)}</div></div></td>
+          <td>${statusBadge(sts)}</td>
+          <td style="white-space:nowrap;text-align:right">
+            <button class="act-btn ab-edit admin-only" onclick="openEditInvoiceModal('${escQ(inv.invoiceID)}')" title="Edit Invoice"><i class="fas fa-edit"></i></button>
+            <button class="act-btn ab-fu" onclick="openFUModalForParty('${escQ(inv.partyID)}','${escQ(inv.invoiceNo)}')" title="Log Follow-up"><i class="fas fa-phone-alt"></i></button>
+            <button class="act-btn ab-pay" onclick="openRPModalForParty('${escQ(inv.partyID)}')" title="Record Payment"><i class="fas fa-indian-rupee-sign"></i></button>
+          </td>
+        </tr>`;
+          }).join('');
+      }
+
+function shortPage(d) {
+        const list = _getShortPayList();
+        _pState.shortpay = Math.max(1, Math.min(_pState.shortpay + d, Math.ceil(list.length / PER)));
+        renderShortPay();
+      }
+
+      // Helper: get total discount given for an invoice from payments
+      function _discForInvoice(invoiceNo) {
+        // Use word-boundary match to avoid partial invoice number matches
+        const re = new RegExp('(^|,\s*)' + invoiceNo.replace(/[-]/g, '\\$&') + '(\s*,|$)');
+        return (DB.payments || [])
+          .filter(p => p.appliedTo && re.test(p.appliedTo))
+          .reduce((s, p) => s + (p.discountGiven || 0), 0);
+      }
+
+      // Short payment: party paid less than expected (billValue - TDS - slabDisc)
+      function _tdsForInvoice(invoiceNo) {
+        // Sum TDS from all payment records applied to this invoice
+        const re = new RegExp('(^|,\s*)' + invoiceNo.replace(/[-]/g, '\\$&') + '(\s*,|$)');
+        return (DB.payments || [])
+          .filter(p => p.appliedTo && re.test(p.appliedTo))
+          .reduce((s, p) => s + (p.tdsDeducted || 0), 0);
+      }
+
+      function _isShortPay(inv) {
+        if (isPaid(inv)) return false;
+        const paidAmt = inv.paidAmount || 0;
+        if (paidAmt <= 0) return false; // never paid — not short, just unpaid
+        const writeOff  = inv.writeOff || 0;
+        const discGiven = _discForInvoice(inv.invoiceNo);
+        const tdsPaid   = _tdsForInvoice(inv.invoiceNo);
+        // expected = billValue - invoiceTDS - slabDisc (calcExpected handles this)
+        const { expected } = calcExpected(inv);
+        // Short if total settlement < expected
+        return (paidAmt + tdsPaid + discGiven + writeOff) < expected;
+      }
+
+      function _getShortPayList() {
+        const q = ((document.getElementById('sp-search') || {}).value || '').toLowerCase();
+        const from = (document.getElementById('sp-from') || {}).value || '';
+        const to = (document.getElementById('sp-to') || {}).value || '';
+
+        return (DB.invoices || []).filter(inv => {
+          if (!_isShortPay(inv)) return false;
+          if (q && !inv.partyName.toLowerCase().includes(q) && !inv.invoiceNo.toLowerCase().includes(q)) return false;
+          if (from || to) {
+            const d = parseIST(inv.invoiceDate);
+            if (from && d && d < new Date(from)) return false;
+            if (to && d && d > new Date(to + 'T23:59:59')) return false;
+          }
+          return true;
+        }).sort((a, b) => (parseIST(b.invoiceDate) || 0) - (parseIST(a.invoiceDate) || 0));
+      }
+
+      function renderShortPay() {
+        const list = _getShortPayList();
+        const total = list.length;
+        const pg = _pState.shortpay;
+        const page = list.slice((pg - 1) * PER, pg * PER);
+
+        const totalShort = list.reduce((s, inv) => {
+          const paidAmt   = inv.paidAmount || 0;
+          const discGiven = _discForInvoice(inv.invoiceNo);
+          const tdsPaid   = _tdsForInvoice(inv.invoiceNo);
+          const writeOff  = inv.writeOff || 0;
+          const { expected } = calcExpected(inv);
+          return s + Math.max(0, expected - paidAmt - tdsPaid - discGiven - writeOff);
+        }, 0);
+
+        txt('sp-sub', total + ' invoices with short payment');
+        const badge = document.getElementById('sp-total-badge');
+        if (badge) badge.textContent = INR(totalShort) + ' short';
+
+        txt('sp-info', `${((pg - 1) * PER) + 1}-${Math.min(pg * PER, total)} of ${total} invoices`);
+        _updatePager('sp', pg, total);
+
+        const tbody = document.getElementById('sp-tbody');
+        if (!tbody) return;
+
+        tbody.innerHTML = page.length === 0
+          ? emptyRow(9, '[OK] No short payments -- all good!')
+          : page.map(inv => {
+            const { expected } = calcExpected(inv);
+            const paidAmt   = inv.paidAmount || 0;
+            const writeOff  = inv.writeOff || 0;
+            const discGiven = _discForInvoice(inv.invoiceNo);
+            const tdsPaid   = _tdsForInvoice(inv.invoiceNo);
+            const shortAmt  = Math.max(0, expected - paidAmt - tdsPaid - discGiven - writeOff);
+            const od = daysOD(inv);
+            return `<tr style="${shortAmt > 0 ? 'background:#FEF7E0' : ''}">
+          <td style="font-family:monospace;font-size:11px;font-weight:600">${inv.invoiceNo}</td>
+          <td style="font-size:12px;font-weight:600;cursor:pointer" onclick="openPartyModal('${escQ(inv.partyID)}')">${inv.partyName}</td>
+          <td style="font-size:11px${od > 0 ? ';color:var(--red);font-weight:700' : ''}">${inv.dueDate}${od > 0 ? ' ' + ageBadge(od) : ''}</td>
+          <td class="num" style="color:#34A853;font-weight:700">${INR(expected)}</td>
+          <td class="num" style="color:var(--green)">${INR(paidAmt)}</td>
+          <td class="num" style="color:#7C3AED">${discGiven > 0 ? INR(discGiven) : '--'}</td>
+          <td class="num" style="font-weight:800;color:var(--red);font-size:13px">- ${INR(shortAmt)}</td>
+          <td>${statusBadge('PartPaid')}</td>
+          <td style="white-space:nowrap">
+            <button class="btn btn-sm" onclick="openEditInvoiceModal('${escQ(inv.invoiceID)}')" title="Edit Invoice" style="background:#F5F3FF;color:#7C3AED;border:1px solid #DDD6FE" class="admin-only"><i class="fas fa-edit" style="font-size:10px"></i></button>
+            <button class="btn btn-sm btn-amber" onclick="openFUModalForParty('${escQ(inv.partyID)}','${escQ(inv.invoiceNo)}')" title="Log Follow-up why short"><i class="fas fa-phone-alt" style="font-size:10px"></i></button>
+            <button class="btn btn-sm btn-green" onclick="openRPModalForParty('${escQ(inv.partyID)}')" title="Record remaining payment"><i class="fas fa-indian-rupee-sign" style="font-size:10px"></i></button>
+            ${window._isAdmin ? `<button class="btn btn-sm" onclick="openWriteOffModal('${escQ(inv.invoiceID)}','${escQ(inv.invoiceNo)}',${Math.round(shortAmt)})" title="Write-Off" style="background:#F3F4F6;color:#6B7280;border:1px solid #E5E7EB;font-size:10px"><i class="fas fa-times-circle" style="font-size:10px"></i></button>` : ''}
+          </td>
+        </tr>`;
+          }).join('');
+      }
+
+      function latePage(d) {
+        const list = _getLatePayList();
+        _pState.latepay = Math.max(1, Math.min(_pState.latepay + d, Math.ceil(list.length / PER)));
+        renderLatePay();
+      }
+
+      function _getLatePayList() {
+        const q = ((document.getElementById('lp-search') || {}).value || '').toLowerCase();
+        const from = (document.getElementById('lp-from') || {}).value || '';
+        const to = (document.getElementById('lp-to') || {}).value || '';
+
+        const paidInvoices = (DB.invoices || []).filter(i => isPaid(i));
+        const result = [];
+
+        paidInvoices.forEach(inv => {
+          const invPayments = (DB.payments || []).filter(p =>
+            p.appliedTo && p.appliedTo.includes(inv.invoiceNo)
+          );
+          if (!invPayments.length) return;
+
+          const payDates = invPayments.map(p => parseIST(p.paymentDate)).filter(Boolean);
+          const firstPayDate = payDates.length ? new Date(Math.min(...payDates.map(d => d.getTime()))) : null;
+          if (!firstPayDate) return;
+
+          const dueDate = parseIST(inv.dueDate);
+          if (!dueDate) return;
+
+          const daysLate = Math.floor((firstPayDate - dueDate) / 86400000);
+          if (daysLate <= 0) return; // not late
+
+          if (from && firstPayDate < new Date(from)) return;
+          if (to && firstPayDate > new Date(to + 'T23:59:59')) return;
+
+          if (q && !inv.partyName.toLowerCase().includes(q)) return;
+
+          const slabLost = inv.slabPct && inv.slabPct !== '0';
+
+          result.push({
+            inv, firstPayDate, daysLate, slabLost,
+            payDateStr: firstPayDate.getDate().toString().padStart(2, '0') + '/' +
+              (firstPayDate.getMonth() + 1).toString().padStart(2, '0') + '/' +
+              firstPayDate.getFullYear()
+          });
+        });
+
+        return result.sort((a, b) => b.daysLate - a.daysLate); // worst offenders first
+      }
+
+      let _lpSort = { col: 'maxDays', dir: -1 };
+      function setLPSort(col) {
+        if (_lpSort.col === col) _lpSort.dir *= -1; else { _lpSort.col = col; _lpSort.dir = -1; }
+        window._lpExpanded = {}; // reset on sort
+        renderLatePay();
+      }
+      // Late pay group clicks handled via direct onclick on tr
+      function _lpSortIcon(col) {
+        if (_lpSort.col !== col) return ' <i class="fas fa-sort" style="opacity:.25;font-size:10px"></i>';
+        return _lpSort.dir === -1
+          ? ' <i class="fas fa-sort-down" style="font-size:10px;color:var(--red)"></i>'
+          : ' <i class="fas fa-sort-up" style="font-size:10px;color:var(--red)"></i>';
+      }
+      function renderLatePay() {
+        const list = _getLatePayList();
+        const total = list.length;
+        const pg = _pState.latepay;
+        
+        // Group by Party
+        const grouped = {};
+        list.forEach(item => {
+          const pid = item.inv.partyID;
+          if (!grouped[pid]) {
+            grouped[pid] = { 
+              partyName: item.inv.partyName, 
+              partyID: item.inv.partyID,
+              count: 0, 
+              totalLateDays: 0, 
+              maxLateDays: 0,
+              totalAmt: 0,
+              items: [] 
+            };
+          }
+          grouped[pid].count++;
+          grouped[pid].totalLateDays += item.daysLate;
+          grouped[pid].maxLateDays = Math.max(grouped[pid].maxLateDays, item.daysLate);
+          grouped[pid].totalAmt += item.inv.netAmount;
+          grouped[pid].items.push(item);
+        });
+
+        const groupedList = Object.values(grouped).sort((a, b) => {
+          let av, bv;
+          if (_lpSort.col === 'party') { av = a.partyName||''; bv = b.partyName||''; }
+          else if (_lpSort.col === 'count') { av = a.count; bv = b.count; }
+          else if (_lpSort.col === 'amt') { av = a.totalAmt; bv = b.totalAmt; }
+          else { av = a.maxLateDays; bv = b.maxLateDays; } // maxDays default
+          if (av < bv) return -1 * _lpSort.dir;
+          if (av > bv) return 1 * _lpSort.dir;
+          return 0;
+        });
+        const totalGroups = groupedList.length;
+        const page = groupedList.slice((pg - 1) * PER, pg * PER);
+
+        txt('lp-sub', total + ' late invoices across ' + totalGroups + ' parties');
+        const badge = document.getElementById('lp-total-badge');
+        if (badge) badge.textContent = totalGroups + ' parties';
+
+        txt('lp-info', `${((pg - 1) * PER) + 1}-${Math.min(pg * PER, totalGroups)} of ${totalGroups} parties`);
+        _updatePager('lp', pg, totalGroups);
+
+        const tbody = document.getElementById('lp-tbody');
+        if (!tbody) return;
+        const lpThead = document.getElementById('lp-thead');
+        if (lpThead) lpThead.innerHTML = `<tr>
+          <th style="cursor:pointer;user-select:none" onclick="setLPSort('party')">Party${_lpSortIcon('party')}</th>
+          <th class="num" style="cursor:pointer;user-select:none" onclick="setLPSort('maxDays')">Avg/Max Late${_lpSortIcon('maxDays')}</th>
+          <th class="num" style="cursor:pointer;user-select:none" onclick="setLPSort('amt')">Invoice Amt${_lpSortIcon('amt')}</th>
+          <th style="cursor:pointer;user-select:none" onclick="setLPSort('count')">Count${_lpSortIcon('count')}</th>
+          <th></th>
+        </tr>`;
+
+        let _lpExp = window._lpExpanded || {}; window._lpExpanded = _lpExp;
+        tbody.innerHTML = page.length === 0
+          ? emptyRow(6, '[OK] No late payments found')
+          : page.map((group, idx) => {
+            const avgLate = Math.round(group.totalLateDays / group.count);
+            const lateColor = group.maxLateDays > 30 ? 'var(--red)' : group.maxLateDays > 15 ? '#F9AB00' : '#EA8600';
+            const isOpen = _lpExp[idx] !== false;
+            return `
+        <tr class="lp-group-hdr" data-idx="${idx}" data-isopen="${isOpen?'1':'0'}" style="background:#F8FAFC;cursor:pointer" onclick="toggleLPGroup(this)">
+          <td colspan="4" style="font-weight:700">
+            <i class="fas fa-chevron-${isOpen?'down':'right'}" style="margin-right:8px;font-size:10px;color:var(--muted)"></i>
+            ${group.partyName}
+            <span style="font-weight:400;color:var(--muted);margin-left:8px">(${group.count} late bills)</span>
+          </td>
+          <td class="num" style="font-weight:800;color:${lateColor}">Avg: ${avgLate}d / Max: ${group.maxLateDays}d</td>
+          <td class="num" style="font-weight:700">${INR(group.totalAmt)}</td>
+          <td></td>
+          <td>
+            <button class="btn btn-sm btn-amber" onclick="event.stopPropagation();openFUModalForParty('${escQ(group.partyID)}','')" title="Follow up"><i class="fas fa-phone-alt"></i></button>
+          </td>
+        </tr>
+        ${group.items.map(item => `
+          <tr style="font-size:11px;opacity:0.85">
+            <td style="padding-left:30px;color:var(--muted)">- ${item.inv.invoiceNo}</td>
+            <td style="color:var(--muted)">Due: ${item.inv.dueDate}</td>
+            <td style="color:var(--muted)">Paid: ${item.payDateStr}</td>
+            <td class="num" style="color:${item.daysLate > 15 ? 'var(--red)' : 'inherit'}">${item.daysLate}d late</td>
+            <td class="num">${INR(item.inv.netAmount)}</td>
+            <td colspan="3"></td>
+          </tr>
+        `).join('')}
+      `;
+          }).join('');
+      }
+
+      let _modalPartyID = '';
+      function openPartyModal(partyID) {
+        _modalPartyID = partyID;
+        const p = (DB.parties || []).find(x => x.partyID === partyID);
+        if (!p) return;
+
+        const invList = (DB.invoices || []).filter(i => i.partyID === partyID && !isPaid(i));
+        const fuList = [...(DB.followups || []).filter(f => f.partyID === partyID)].reverse().slice(0, 8);
+        const totalOut = invList.reduce((s, i) => s + pending(i), 0);
+
+        txt('pm-name', p.name);
+        document.getElementById('pm-name').innerHTML = p.name + (p.rating ? renderStars(p.rating) : '');
+        txt('pm-sub', [p.city, p.head].filter(v => v && v !== '--').join('  ') || '--');
+        txt('pm-out', INR(totalOut));
+        txt('pm-phone', p.phone || '--');
+        txt('pm-cat', p.category || '--');
+
+        const slab = p.days15 ? '1.5% (' + p.days15 + 'd)' : p.days1 ? '1% (' + p.days1 + 'd)' : 'Nil (' + p.days0 + 'd)';
+        document.getElementById('pm-slab').innerHTML = `<span class="${p.days15 ? 'slab-15' : p.days1 ? 'slab-1' : 'slab-0'}">${slab}</span>`;
+
+        document.getElementById('pm-invoices').innerHTML = invList.length === 0
+          ? '<div style="font-size:11px;color:var(--muted);padding:8px">No pending invoices</div>'
+          : invList.map(i => {
+            const od = daysOD(i);
+            const pend = pending(i);
+            const { expected, exp15, exp1, expNil, billVal } = calcExpected(i);
+            const hasSlab = i.slabPct && i.slabPct !== '0';
+            return `
+      <div style="background:#F8FAFC;border-radius:8px;padding:9px 12px;border:1px solid ${od > 0 ? '#F6AEA9' : 'var(--border)'}">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:11px;font-weight:700;font-family:monospace">${i.invoiceNo}</span>
+              ${slabBadge(i.slabPct)}
+              ${od > 0 ? ageBadge(od) : ''}
+            </div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px">
+              Due: ${i.dueDate}
+              ${hasSlab ? `<span style="color:#34A853;font-weight:600;margin-left:6px">Exp: ${INR(expected)}</span>` : ''}
+            </div>
+            <div style="font-size:9px;color:var(--muted);margin-top:3px">
+              Bill: <b>${INR(billVal)}</b>
+              &nbsp;<span style="color:#1E8E3E">1.5%→${INR(exp15)}</span>
+              &nbsp;<span style="color:#F9AB00">1%→${INR(exp1)}</span>
+              &nbsp;<span style="color:#6B7280">Nil→${INR(expNil)}</span>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+            <div style="text-align:right">
+              <div style="font-size:13px;font-weight:800;${od > 0 ? 'color:var(--red)' : 'color:var(--text)'}">${INR(pend)}</div>
+            </div>
+            
+            <button class="btn btn-sm btn-green" title="Record payment for this invoice"
+              onclick="closePartyModal();openRPModalForPartyAndInvoice('${escQ(_modalPartyID)}',${Math.round(expected) || Math.round(pend)})"
+              style="font-size:10px;padding:4px 8px">
+              <i class="fas fa-indian-rupee-sign"></i>
+            </button>
+            ${window._isAdmin ? `
+            <button class="btn btn-sm btn-ghost" title="Write-off & close"
+              onclick="confirmCloseInvoice('${escQ(i.invoiceID)}','${escQ(i.invoiceNo)}','${escQ(_modalPartyID)}')"
+              style="color:#94A3B8;border-color:#E2E8F0;width:28px;height:28px;padding:0;flex-shrink:0">
+              <i class="fas fa-times-circle" style="font-size:12px"></i>
+            </button>` : ''}
+          </div>
+        </div>
+      </div>`;
+          }).join('');
+
+        document.getElementById('pm-followups').innerHTML = fuList.length === 0
+          ? '<div style="font-size:11px;color:var(--muted);padding:8px">No follow-ups logged</div>'
+          : fuList.map(f => {
+            const bg = modeBg(f.mode);
+            return `<div style="display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid #F8FAFC">
+          <div style="width:24px;height:24px;border-radius:50%;background:${bg.split(';')[0]};display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px">
+            <i class="fas ${modeIcon(f.mode)}" style="font-size:9px;color:${bg.split(':')[1]}"></i>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:600">${(f.datetime || '').split(' ')[0]}  ${f.mode}</div>
+            <div style="font-size:11px;color:var(--muted);overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${f.notes}</div>
+            ${f.promiseDate ? `<div style="font-size:10px;color:var(--amber)">Promise: ${INR(f.promiseAmt)} by ${f.promiseDate}</div>` : ''}
+          </div>
+        </div>`;
+          }).join('');
+
+        // Populate Write-Off / Discount Given section
+        const partyPaymentsDisc = (DB.payments || []).filter(p => p.partyID === partyID && (p.discountGiven || 0) > 0);
+        const partyDTBG = (DB.payments || []).filter(p => p.partyID === partyID && (p.discountToBeGiven || 0) > 0);
+        const woInvoices = (DB.invoices || []).filter(i => i.partyID === partyID && (i.status === 'Written-Off' || (i.writeOff || 0) > 0));
+
+        // DTBG section
+        const dtbgSec = document.getElementById('pm-dtbg-section');
+        if (dtbgSec) dtbgSec.style.display = partyDTBG.length > 0 ? 'block' : 'none';
+        const pmDtbgEl = document.getElementById('pm-dtbg');
+        if (pmDtbgEl) pmDtbgEl.innerHTML = partyDTBG.length === 0 ? '' : partyDTBG.map(p =>
+          `<div style="background:#F5F3FF;border-radius:7px;padding:7px 10px;border:1px solid #DDD6FE;display:flex;justify-content:space-between">
+            <div><span style="font-size:11px;font-weight:700;color:#7C3AED">Pending Discount</span>
+            <div style="font-size:10px;color:var(--muted)">${p.paymentDate} · ${p.paymentID}</div></div>
+            <span style="font-weight:800;color:#7C3AED">${INR(p.discountToBeGiven)}</span>
+          </div>`
+        ).join('');
+
+        // WO section
+        const woSec = document.getElementById('pm-wo-section');
+        const hasWO = partyPaymentsDisc.length > 0 || woInvoices.length > 0;
+        if (woSec) woSec.style.display = hasWO ? 'block' : 'none';
+        const pmWoEl = document.getElementById('pm-wo');
+        if (pmWoEl) pmWoEl.innerHTML = !hasWO ? '' : [
+          ...partyPaymentsDisc.map(p => `<div style="background:#E6F4EA;border-radius:7px;padding:7px 10px;border:1px solid #A7F3D0;display:flex;justify-content:space-between">
+            <div><span style="font-size:11px;font-weight:700;color:#1E8E3E">Discount Given</span>
+            <div style="font-size:10px;color:var(--muted)">${p.paymentDate} · ${p.appliedTo||'--'}</div></div>
+            <span style="font-weight:800;color:#1E8E3E">${INR(p.discountGiven)}</span>
+          </div>`),
+          ...woInvoices.map(i => `<div style="background:#FEF3C7;border-radius:7px;padding:7px 10px;border:1px solid #FDD663;display:flex;justify-content:space-between">
+            <div><span style="font-size:11px;font-weight:700;color:#F9AB00">Written-Off</span>
+            <div style="font-size:10px;color:var(--muted)">${i.invoiceNo} · ${i.dueDate}</div></div>
+            <span style="font-weight:800;color:#F9AB00">${INR(i.writeOff||0)}</span>
+          </div>`)
+        ].join('');
+
+        document.getElementById('party-modal').classList.add('show');
+      }
+
+      function closePartyModal() { document.getElementById('party-modal').classList.remove('show'); }
+      function prefillFU() { closePartyModal(); openFUModalForParty(_modalPartyID, ''); }
+      function prefillRP() { closePartyModal(); openRPModalForParty(_modalPartyID); }
+
+      function openRPModalForPartyAndInvoice(partyID, amount) {
+        openRPModal();
+        setTimeout(() => {
+          const p = (DB.parties || []).find(x => x.partyID === partyID);
+          if (!p) return;
+          document.getElementById('rp-party-id').value = p.partyID;
+          document.getElementById('rp-party-code').value = p.partyCode || '';
+          document.getElementById('rp-party-name').value = p.name;
+          const inp = document.getElementById('rp-modal-ss-inp');
+          if (inp) inp.value = p.name;
+          if (_ssState['rp-modal-ss']) { _ssState['rp-modal-ss'].value = p.partyID; _ssState['rp-modal-ss'].text = p.name; }
+          const amtEl = document.getElementById('rp-amount');
+          if (amtEl && amount > 0) {
+            amtEl.value = amount;
+            amtEl.style.borderColor = '#34A853';
+            amtEl.style.background = '#E6F4EA';
+            setTimeout(() => { amtEl.style.borderColor = ''; amtEl.style.background = ''; }, 2000);
+          }
+          onRPParty(partyID);
+        }, 120);
+      }
+
+      function openWriteOffModal(invoiceID, invoiceNo, shortAmt) {
+        Swal.fire({
+          title: 'Write-Off: ' + invoiceNo,
+          html: `<div style="font-size:13px;color:#64748B;margin-bottom:10px">
+            Short amount: <b style="color:var(--red)">₹${shortAmt.toLocaleString('en-IN')}</b><br>
+            Write this off and close the invoice?
+          </div>
+          <input id="swal-wo-amt" class="swal2-input" type="number" value="${Math.round(shortAmt)}" placeholder="Write-off amount" style="font-size:13px">
+          <input id="swal-wo-reason" class="swal2-input" placeholder="Reason (e.g. Short/Settlement)" style="font-size:13px">`,
+          icon: 'warning',
+          showCancelButton: true,
+          confirmButtonText: '<i class="fas fa-times-circle"></i> Write-Off',
+          cancelButtonText: 'Cancel',
+          confirmButtonColor: '#EA4335',
+          preConfirm: () => {
+            const amt = parseFloat(document.getElementById('swal-wo-amt').value);
+            const reason = document.getElementById('swal-wo-reason').value.trim();
+            if (!amt || amt <= 0) { Swal.showValidationMessage('Enter valid amount'); return false; }
+            if (!reason) { Swal.showValidationMessage('Enter a reason'); return false; }
+            return { amt, reason };
+          }
+        }).then(result => {
+          if (!result.isConfirmed) return;
+          Swal.fire({ title: 'Processing...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+          google.script.run
+            .withSuccessHandler(r => {
+              if (r.success) {
+                Swal.fire({ icon: 'success', title: 'Written Off', text: r.msg, timer: 2500, showConfirmButton: false });
+                _silentDataRefresh();
+              } else Swal.fire('Error', r.error, 'error');
+            })
+            .withFailureHandler(e => Swal.fire('Error', e.message, 'error'))
+            .writeOffInvoice(invoiceID, result.value.amt, result.value.reason, URL_NAME);
+        });
+      }
+
+      function confirmCloseInvoice(invoiceID, invoiceNo, partyID) {
+        Swal.fire({
+          title: 'Close Invoice ' + invoiceNo + '?',
+          html: `<div style="font-size:13px;color:#64748B;margin-bottom:12px">
+      Close invoice <b>${invoiceNo}</b> - mark as settled.<br>
+      Use for write-offs, settlements, or discount adjustments.
+    </div>
+    <input id="swal-reason" class="swal2-input" placeholder="Reason (e.g. Write-off, Settlement)" style="font-size:13px">`,
+          icon: 'warning',
+          showCancelButton: true,
+          confirmButtonText: '<i class="fas fa-times-circle"></i> Close Invoice',
+          cancelButtonText: 'Cancel',
+          confirmButtonColor: '#EA4335',
+          preConfirm: () => {
+            const reason = document.getElementById('swal-reason').value.trim();
+            if (!reason) { Swal.showValidationMessage('Please enter a reason'); return false; }
+            return reason;
+          }
+        }).then(result => {
+          if (!result.isConfirmed) return;
+          Swal.fire({ title: 'Closing...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+          google.script.run
+            .withSuccessHandler(r => {
+              if (r.success) {
+                Swal.fire({ icon: 'success', title: 'Invoice Closed', text: r.msg, timer: 2500, showConfirmButton: false });
+                closePartyModal();
+                _silentDataRefresh();
+              } else {
+                Swal.fire('Error', r.error, 'error');
+              }
+            })
+            .withFailureHandler(e => Swal.fire('Error', e.message, 'error'))
+            .closeInvoice(invoiceID, result.value, URL_NAME);
+        });
+      }
+
+      function resetPartyForm() {
+        ['ap-code', 'ap-name', 'ap-city', 'ap-state', 'ap-phone', 'ap-phone2', 'ap-email', 'ap-contact',
+          'ap-gstin', 'ap-pan', 'ap-head', 'ap-credit', 'ap-d15', 'ap-d1', 'ap-d0', 'ap-terms',
+          'ap-address', 'ap-tags', 'ap-notes'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+        const cat = document.getElementById('ap-cat'); if (cat) cat.value = 'B';
+      }
+
+      function submitParty() {
+        const name = (document.getElementById('ap-name').value || '').trim();
+        const code = (document.getElementById('ap-code').value || '').trim();
+        if (!name) { Swal.fire('Required', 'Party name is required', 'warning'); return; }
+        if (!code) { Swal.fire('Required', 'Party code is required', 'warning'); return; }
+
+        const data = {
+          partyCode: code,
+          name, city: document.getElementById('ap-city').value,
+          state: document.getElementById('ap-state').value,
+          phone: document.getElementById('ap-phone').value,
+          phone2: document.getElementById('ap-phone2').value,
+          email: document.getElementById('ap-email').value,
+          contact: document.getElementById('ap-contact').value,
+          gstin: document.getElementById('ap-gstin').value,
+          pan: document.getElementById('ap-pan').value,
+          head: document.getElementById('ap-head').value,
+          creditLimit: document.getElementById('ap-credit').value,
+          days15: document.getElementById('ap-d15').value || null,
+          days1: document.getElementById('ap-d1').value || null,
+          days0: document.getElementById('ap-d0').value || null,
+          payTerms: document.getElementById('ap-terms').value,
+          category: document.getElementById('ap-cat').value,
+          address: document.getElementById('ap-address').value,
+          tags: document.getElementById('ap-tags').value,
+          notes: document.getElementById('ap-notes').value,
+          status: 'Active'
+        };
+
+        Swal.fire({ title: 'Saving...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+        google.script.run
+          .withSuccessHandler(r => {
+            if (r.success) {
+              Swal.fire({ icon: 'success', title: 'Party Created!', text: r.msg, timer: 2000, showConfirmButton: false });
+              resetPartyForm();
+              _silentDataRefresh();
+              setTimeout(() => nav('parties'), 1800);
+            } else Swal.fire('Error', r.error, 'error');
+          })
+          .withFailureHandler(e => Swal.fire('Error', e.message, 'error'))
+          .createParty(data, URL_NAME);
+      }
+
+      function onAIParty(partyID) {
+        const p = (DB.parties || []).find(x => x.partyID === partyID);
+        if (!p) return;
+        const box = document.getElementById('ai-slab-box');
+        const inf = document.getElementById('ai-slab-info');
+        const slabSel = document.getElementById('ai-slab');
+        const parts = [];
+        if (p.days15) parts.push(`1.5% = ${p.days15} days`);
+        if (p.days1) parts.push(`1% = ${p.days1} days`);
+        if (p.days0) parts.push(`Nil = ${p.days0} days`);
+        inf.textContent = parts.join('  ') || 'No slab configured';
+        box.style.display = 'flex';
+        if (p.days15) slabSel.value = '1.5';
+        else if (p.days1) slabSel.value = '1';
+        else slabSel.value = '0';
+        calcDue();
+      }
+
+      function calcDue() {
+        const partyID = document.getElementById('ai-party-id').value;
+        const slab = document.getElementById('ai-slab').value;
+        const dateVal = document.getElementById('ai-invdate').value;
+        if (!partyID || !slab || !dateVal) return;
+
+        const p = (DB.parties || []).find(x => x.partyID === partyID);
+        if (!p) return;
+
+        let days = p.days0 || 30;
+        if (slab === '1.5' && p.days15) days = p.days15;
+        else if (slab === '1' && p.days1) days = p.days1;
+        else if (slab === '0' && p.days0) days = p.days0;
+
+        const bd = new Date(dateVal);
+        const dd = new Date(bd); dd.setDate(dd.getDate() + days);
+        const str = String(dd.getDate()).padStart(2, '0') + '/' + String(dd.getMonth() + 1).padStart(2, '0') + '/' + dd.getFullYear();
+
+        document.getElementById('ai-duedate-disp').textContent = str + ' (' + days + ' days)';
+        document.getElementById('ai-duedate').value = str;
+        document.getElementById('ai-duedays').value = days;
+      }
+
+      function calcNet() {
+        const gross = parseFloat(document.getElementById('ai-gross').value) || 0;
+        const cgst = parseFloat(document.getElementById('ai-cgst').value) || 0;
+        const sgst = parseFloat(document.getElementById('ai-sgst').value) || 0;
+        const igst = parseFloat(document.getElementById('ai-igst').value) || 0;
+        const tcs = parseFloat(document.getElementById('ai-tcs').value) || 0;
+        const other = parseFloat(document.getElementById('ai-other').value) || 0;
+        const cd = parseFloat(document.getElementById('ai-cd-disc').value) || 0;
+        const net = gross - cgst - sgst - igst - tcs - other - cd;
+        const box = document.getElementById('ai-net-box');
+        const val = document.getElementById('ai-net-val');
+        if (gross > 0) {
+          box.style.display = 'flex';
+          val.textContent = INR(net);
+          val.style.color = net >= 0 ? 'var(--green)' : 'var(--red)';
+        } else {
+          box.style.display = 'none';
+        }
+      }
+
+      function resetInvoiceForm() {
+        ['ai-invno', 'ai-vehicle', 'ai-head', 'ai-remarks'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+        ['ai-party-id', 'ai-party-code', 'ai-party-name', 'ai-duedate', 'ai-duedays'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+        ['ai-gross', 'ai-cgst', 'ai-sgst', 'ai-igst', 'ai-tcs', 'ai-other', 'ai-cd-disc'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+        const s = document.getElementById('ai-slab'); if (s) s.value = '';
+        const b = document.getElementById('ai-slab-box'); if (b) b.style.display = 'none';
+        const n = document.getElementById('ai-net-box'); if (n) n.style.display = 'none';
+        document.getElementById('ai-duedate-disp').textContent = '--';
+        const inp = document.getElementById('ai-ss-inp'); if (inp) inp.value = '';
+        if (_ssState['ai-ss']) { _ssState['ai-ss'].value = ''; _ssState['ai-ss'].text = ''; }
+      }
+
+      function submitInvoice() {
+        const partyID = document.getElementById('ai-party-id').value;
+        const partyName = document.getElementById('ai-party-name').value;
+        const invoiceNo = (document.getElementById('ai-invno').value || '').trim();
+        const invDate = document.getElementById('ai-invdate').value;
+        const slab = document.getElementById('ai-slab').value;
+        const dueDate = document.getElementById('ai-duedate').value;
+        const gross = parseFloat(document.getElementById('ai-gross').value) || 0;
+
+        if (!partyID) { Swal.fire('Required', 'Select a party first', 'warning'); return; }
+        if (!invoiceNo) { Swal.fire('Required', 'Invoice number is required', 'warning'); return; }
+        if (!invDate) { Swal.fire('Required', 'Invoice date is required', 'warning'); return; }
+        if (!slab) { Swal.fire('Required', 'Select a slab', 'warning'); return; }
+        if (!gross) { Swal.fire('Required', 'Bill Value is required', 'warning'); return; }
+
+        const cgst = parseFloat(document.getElementById('ai-cgst').value) || 0;
+        const sgst = parseFloat(document.getElementById('ai-sgst').value) || 0;
+        const igst = parseFloat(document.getElementById('ai-igst').value) || 0;
+        const tcs = parseFloat(document.getElementById('ai-tcs').value) || 0;
+        const other = parseFloat(document.getElementById('ai-other').value) || 0;
+        const cd = parseFloat(document.getElementById('ai-cd-disc').value) || 0;
+        const net = gross - cgst - sgst - igst - tcs - other - cd;
+
+        const fmtDate = d => {
+          const dt = new Date(d);
+          return String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0') + '/' + dt.getFullYear();
+        };
+
+        const data = {
+          partyID, partyName,
+          partyCode: document.getElementById('ai-party-code').value,
+          invoiceNo,
+          invoiceDate: fmtDate(invDate),
+          dueDate: dueDate || fmtDate(invDate),
+          dueDays: parseInt(document.getElementById('ai-duedays').value) || 0,
+          slabPct: slab,
+          billValue: gross, cgst, sgst, igst, tcs, otherDed: other, discountGiven: parseFloat(document.getElementById("ai-cd-disc").value)||0,
+          netAmount: net,
+          vehicleNo: document.getElementById('ai-vehicle').value,
+          head: document.getElementById('ai-head').value,
+          remarks: document.getElementById('ai-remarks').value
+        };
+
+        Swal.fire({ title: 'Saving...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+        google.script.run
+          .withSuccessHandler(r => {
+            if (r.success) {
+              Swal.fire({ icon: 'success', title: 'Invoice Saved!', text: r.msg, timer: 2000, showConfirmButton: false });
+              resetInvoiceForm();
+              _silentDataRefresh();
+              setTimeout(() => nav('invoices'), 1800);
+            } else Swal.fire('Error', r.error, 'error');
+          })
+          .withFailureHandler(e => Swal.fire('Error', e.message, 'error'))
+          .createInvoice(data, URL_NAME);
+      }
+
+      function onRPParty(partyID) {
+        const bills = (DB.invoices || []).filter(i => i.partyID === partyID && !isPaid(i))
+          .sort((a, b) => (parseIST(a.invoiceDate) || 0) - (parseIST(b.invoiceDate) || 0));
+        const box = document.getElementById('rp-bills-box');
+        const list = document.getElementById('rp-bills-list');
+        if (!bills.length) { box.style.display = 'none'; return; }
+        box.style.display = 'block';
+
+        list.innerHTML = bills.map(inv => {
+          const od = daysOD(inv);
+          const pend = pending(inv);
+          const { netVal, billVal, tds, disc, disc15, disc1, expected, exp15, exp1, expNil, pct } = calcExpected(inv);
+          const discLabel = pct > 0 ? (pct * 100) + '% disc' : '';
+          const borderClr = od > 0 ? '#F6AEA9' : '#E2E8F0';
+
+          return `<div style="background:#F8FAFC;border-radius:8px;padding:10px 12px;border:1.5px solid ${borderClr};display:flex;gap:12px;transition:all .15s" class="rp-inv-row">
+            <div style="padding-top:2px">
+              <input type="checkbox" class="rp-inv-check" value="${inv.invoiceNo}" 
+                data-expected="${Math.round(pend)}" data-billtotal="${Math.round(billVal)}" data-expected-disc="${Math.round(expected)}" 
+                onchange="updateRPSummary()" style="width:18px;height:18px;cursor:pointer">
+            </div>
+            <div style="flex:1;cursor:pointer" onclick="this.previousElementSibling.querySelector('input').click()">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+                <div>
+                  <div style="font-size:11px;font-weight:700;font-family:monospace">${inv.invoiceNo}</div>
+                  <div style="font-size:10px;color:var(--muted)">Bill: ${inv.invoiceDate}&nbsp;&nbsp;|&nbsp;&nbsp;Due: ${inv.dueDate} ${od > 0 ? ageBadge(od) : ''}</div>
+                </div>
+                <div style="text-align:right">
+                  ${inv.paidAmount > 0 ? `<div style="font-size:10px;color:#1E8E3E;font-weight:600">Paid: ${INR(inv.paidAmount)}</div>` : ''}
+                  <div style="font-size:13px;font-weight:800;color:${pend > 0 ? 'var(--red)' : '#1E8E3E'}">${INR(pend > 0 ? pend : billVal)}</div>
+                  <div style="font-size:9px;color:var(--muted);font-weight:500">${pend > 0 ? 'Remaining' : 'Bill Value'}</div>
+                </div>
+              </div>
+              <div style="background:#fff;border-radius:6px;padding:7px 10px;border:1px solid #E2E8F0;font-size:11px">
+                ${inv.paidAmount > 0 ? `<div style="display:flex;justify-content:space-between;color:#1E8E3E;margin-bottom:3px;padding-bottom:3px;border-bottom:1px solid #E6F4EA">
+                  <span style="font-weight:600"><i class="fas fa-check-circle" style="margin-right:3px"></i>Already Paid</span>
+                  <span style="font-weight:700">${INR(inv.paidAmount)}</span>
+                </div>` : ''}
+                <div style="display:flex;justify-content:space-between;color:var(--muted);margin-bottom:3px">
+                  <span>Bill Value</span><span style="font-weight:600">${INR(netVal)}</span>
+                </div>
+                ${inv.paidAmount > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:3px">
+                  <span style="color:#1E8E3E">Already Paid</span><span style="color:#1E8E3E;font-weight:600">- ${INR(inv.paidAmount)}</span>
+                </div>` : ''}
+                ${_discForInvoice(inv.invoiceNo) > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:3px">
+                  <span style="color:#7C3AED">Disc Given</span><span style="color:#7C3AED;font-weight:600">- ${INR(_discForInvoice(inv.invoiceNo))}</span>
+                </div>` : ''}
+                <div style="display:flex;justify-content:space-between;color:var(--muted);margin-bottom:3px">
+                  ${tds > 0
+                ? `<span>- TDS</span><span style="color:var(--red)">- ${INR(tds)}</span>`
+                : `<span style="color:var(--sub)">TDS</span><span style="color:var(--sub)">NIL</span>`}
+                </div>
+                ${disc > 0 ? `<div style="display:flex;justify-content:space-between;color:var(--muted);margin-bottom:3px">
+                  <span>- Cash Discount (${discLabel})</span><span style="color:var(--red)">- ${INR(disc)}</span>
+                </div>` : ''}
+                <div style="display:flex;justify-content:space-between;font-weight:800;border-top:1px solid #E2E8F0;padding-top:5px;margin-top:3px">
+                  <span style="color:${pend > 0 ? 'var(--red)' : '#34A853'}">${pend > 0 ? 'Remaining to Pay' : 'Fully Settled'}</span>
+                  <span style="color:${pend > 0 ? 'var(--red)' : '#34A853'};font-size:13px">${INR(pend)}</span>
+                </div>
+                <div style="margin-top:6px;padding-top:5px;border-top:1px dashed #E2E8F0">
+                  <div style="font-size:9px;font-weight:700;color:#94A3B8;letter-spacing:.5px;margin-bottom:4px">PAYMENT REFERENCE</div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px">
+                    <div style="background:#E6F4EA;border-radius:5px;padding:5px 6px;text-align:center">
+                      <div style="font-size:9px;color:#1E8E3E;font-weight:700">1.5% disc</div>
+                      <div style="font-size:12px;font-weight:800;color:#1E8E3E">${INR(exp15)}</div>
+                    </div>
+                    <div style="background:#FEF7E0;border-radius:5px;padding:5px 6px;text-align:center">
+                      <div style="font-size:9px;color:#F9AB00;font-weight:700">1% disc</div>
+                      <div style="font-size:12px;font-weight:800;color:#F9AB00">${INR(exp1)}</div>
+                    </div>
+                    <div style="background:#F9FAFB;border-radius:5px;padding:5px 6px;text-align:center;border:1px solid #E2E8F0">
+                      <div style="font-size:9px;color:#6B7280;font-weight:700">Nil</div>
+                      <div style="font-size:12px;font-weight:800;color:#475569">${INR(expNil)}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>`;
+        }).join('');
+        
+        updateRPSummary();
+      }
+
+      function updateRPSummary() {
+        const checks = document.querySelectorAll('.rp-inv-check:checked');
+        let total = 0;
+        checks.forEach(c => total += parseFloat(c.dataset.expected || 0));
+        
+        const summary = document.getElementById('rp-selection-summary');
+        const selAmt = document.getElementById('rp-sel-amt');
+        const selCount = document.getElementById('rp-sel-count');
+        const amtInp = document.getElementById('rp-amount');
+        
+        if (checks.length > 0) {
+          summary.style.display = 'block';
+          selAmt.textContent = INR(total);
+          selCount.textContent = checks.length + ' invoice(s)';
+          // Show DTBG if non-zero
+          const dtbgEl = document.getElementById('rp-dtbg');
+          const dtbgAmt = dtbgEl ? (parseFloat(dtbgEl.value) || 0) : 0;
+          let dtbgRow = document.getElementById('rp-dtbg-row');
+          if (!dtbgRow) {
+            dtbgRow = document.createElement('div');
+            dtbgRow.id = 'rp-dtbg-row';
+            dtbgRow.style.cssText = 'display:none;justify-content:space-between;font-size:12px;margin-top:4px';
+            summary.appendChild(dtbgRow);
+          }
+          if (dtbgAmt > 0) {
+            dtbgRow.innerHTML = '<span style="color:#7C3AED"><i class="fas fa-tag" style="margin-right:3px"></i>Discount TBG:</span><span style="font-weight:700;color:#7C3AED">' + INR(dtbgAmt) + '</span>';
+            dtbgRow.style.display = 'flex';
+          } else { dtbgRow.style.display = 'none'; }
+          // Show reference breakdown below Amount field - user enters actual received
+          const refRow = document.getElementById('rp-amount-ref');
+          // Show bill value and expected breakdowns as reference
+          // total = sum of pending amounts (data-expected = pend)
+          // Get bill totals from data-billtotal
+          let billTotal = 0;
+          checks.forEach(c => billTotal += parseFloat(c.dataset.billtotal || c.dataset.expected || 0));
+          let refHtml = '<span style="color:var(--red);font-weight:600">Pending: ' + INR(total) + '</span>';
+          if (billTotal > total) {
+            refHtml += ' &nbsp;<span style="color:var(--muted)">(Bill Value: ' + INR(billTotal) + ')</span>';
+          }
+          // Get disc/tds values
+          const discEl = document.getElementById('rp-disc');
+          const tdsEl  = document.getElementById('rp-tds');
+          const discAmt = discEl ? (parseFloat(discEl.value) || 0) : 0;
+          const tdsAmt  = tdsEl  ? (parseFloat(tdsEl.value)  || 0) : 0;
+          if (discAmt > 0 || tdsAmt > 0) {
+            const net = total - discAmt - tdsAmt;
+            refHtml += ' &nbsp;→&nbsp; <span style="color:#1E8E3E;font-weight:600">After disc/TDS: ' + INR(net) + '</span>';
+          }
+          if (refRow) refRow.innerHTML = refHtml;
+        } else {
+          summary.style.display = 'none';
+          const refRow = document.getElementById('rp-amount-ref');
+          if (refRow) refRow.innerHTML = '';
+        }
+      }
+
+      function openRPModal() {
+        // Full reset first — no old values
+        resetPaymentForm();
+        _setDefaultDates();
+
+        // Rebuild party SS fresh
+        const opts = (DB.parties || []).map(p => ({
+          id: p.partyID, name: p.name,
+          meta: [p.city, p.partyCode].filter(Boolean).join(' - ')
+        }));
+        const ssEl = document.getElementById('rp-modal-ss');
+        if (ssEl) {
+          ssEl.innerHTML = '';
+          buildSS('rp-modal-ss', opts, id => {
+            const p = (DB.parties || []).find(x => x.partyID === id);
+            if (!p) return;
+            document.getElementById('rp-party-id').value = p.partyID;
+            document.getElementById('rp-party-code').value = p.partyCode || '';
+            document.getElementById('rp-party-name').value = p.name;
+            onRPParty(id);
+          }, 'Search party...');
+        }
+        document.getElementById('rp-modal').classList.add('show');
+      }
+
+      function closeRPModal() {
+        const modal = document.getElementById('rp-modal');
+        if (modal) {
+          modal.classList.remove('show');
+          modal.style.display = 'none';          // force hide as fallback
+          setTimeout(() => { modal.style.display = ''; }, 50); // restore CSS control
+        }
+        // Close any open SweetAlert dialogs
+        if (typeof Swal !== 'undefined') Swal.close();
+        resetPaymentForm();
+      }
+
+
+      function openRPModalForParty(partyID) {
+        openRPModal();
+        setTimeout(() => {
+          const p = (DB.parties || []).find(x => x.partyID === partyID);
+          if (!p) return;
+          document.getElementById('rp-party-id').value = p.partyID;
+          document.getElementById('rp-party-code').value = p.partyCode || '';
+          document.getElementById('rp-party-name').value = p.name;
+          const inp = document.getElementById('rp-modal-ss-inp');
+          if (inp) inp.value = p.name;
+          if (_ssState['rp-modal-ss']) { _ssState['rp-modal-ss'].value = p.partyID; _ssState['rp-modal-ss'].text = p.name; }
+          onRPParty(partyID);
+        }, 120);
+      }
+
+      function resetPaymentForm() {
+        // Clear all text/number fields
+        ['rp-ref', 'rp-remarks', 'rp-party-id', 'rp-party-code', 'rp-party-name',
+          'rp-amount', 'rp-tds', 'rp-disc', 'rp-dtbg', 'rp-bank'].forEach(id => {
+            const e = document.getElementById(id);
+            if (e) e.value = '';
+          });
+        // Reset mode
+        const modeEl = document.getElementById('rp-mode');
+        if (modeEl) modeEl.value = 'RTGS';
+        // Reset date to today
+        const dateEl = document.getElementById('rp-date');
+        if (dateEl) dateEl.value = new Date().toISOString().split('T')[0];
+        // Reset modal searchable select
+        const inp1 = document.getElementById('rp-modal-ss-inp');
+        if (inp1) { inp1.value = ''; inp1.dataset.val = ''; }
+        if (_ssState && _ssState['rp-modal-ss']) {
+          _ssState['rp-modal-ss'].value = '';
+          _ssState['rp-modal-ss'].text = '';
+        }
+        // Hide bills/expected boxes
+        const box = document.getElementById('rp-bills-box');
+        if (box) box.style.display = 'none';
+        const list = document.getElementById('rp-bills-list');
+        if (list) list.innerHTML = '';
+        const summary = document.getElementById('rp-selection-summary');
+        if (summary) summary.style.display = 'none';
+        const amtInp = document.getElementById('rp-amount');
+        if (amtInp) delete amtInp.dataset.autofilled;
+      }
+
+
+
+      function submitPayment() {
+        const partyID     = document.getElementById('rp-party-id').value;
+        const totalAmount = parseFloat(document.getElementById('rp-amount').value) || 0;
+        const tdsAmt      = parseFloat(document.getElementById('rp-tds').value)    || 0;
+        const discAmt     = parseFloat(document.getElementById('rp-disc').value)   || 0;
+        const payDate     = document.getElementById('rp-date').value;
+        if (!partyID) { Swal.fire('Required', 'Select a party', 'warning'); return; }
+        // Allow 0 cash only when TDS or Discount covers the settlement
+        if (totalAmount <= 0 && tdsAmt <= 0 && discAmt <= 0) {
+          Swal.fire('Required', 'Enter cash amount, or TDS / Discount to settle the invoice', 'warning'); return;
+        }
+
+        const checks = document.querySelectorAll('.rp-inv-check:checked');
+        if (checks.length === 0) {
+          Swal.fire('Required', 'Please select at least one invoice from the list above', 'warning');
+          return;
+        }
+
+        const fmtDate = d => { const dt = new Date(d); return String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0') + '/' + dt.getFullYear(); };
+
+        // Allocate cash across invoices. When cash=0 (TDS-only), still include invoice
+        // with amount=0 so backend closes it via TDS.
+        let allocated = [];
+        let remaining = totalAmount;
+
+        checks.forEach((c, idx) => {
+          const invNo    = c.value;
+          const expected = parseFloat(c.dataset.expected);
+          let amt = 0;
+          if (totalAmount > 0) {
+            if (idx === checks.length - 1) {
+              amt = remaining;
+            } else {
+              amt = Math.min(remaining, expected);
+              remaining -= amt;
+            }
+          }
+          // Always push — even amt=0, backend uses TDS/disc to decide closure
+          allocated.push({ invoiceNo: invNo, amount: amt });
+        });
+
+        const data = {
+          partyID,
+          partyCode: document.getElementById('rp-party-code').value,
+          partyName: document.getElementById('rp-party-name').value,
+          paymentDate: fmtDate(payDate),
+          amount: totalAmount,
+          mode: document.getElementById('rp-mode').value,
+          refNo: document.getElementById('rp-ref').value,
+          tdsDeducted: parseFloat(document.getElementById('rp-tds').value) || 0,
+          discountGiven: parseFloat(document.getElementById('rp-disc').value) || 0,
+          discountToBeGiven: parseFloat((document.getElementById('rp-dtbg')||{}).value) || 0,
+          bankName: (document.getElementById('rp-bank')||{}).value || '',
+          remarks: document.getElementById('rp-remarks').value,
+          invoices: allocated
+        };
+
+        Swal.fire({ title: 'Recording...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+        google.script.run
+          .withSuccessHandler(r => {
+            if (r.success) {
+              Swal.fire({ icon: 'success', title: 'Payment Recorded!', text: r.msg, timer: 2500, showConfirmButton: false });
+              closeRPModal();
+              _silentDataRefresh();
+            } else Swal.fire('Error', r.error, 'error');
+          })
+          .withFailureHandler(e => Swal.fire('Error', e.message, 'error'))
+          .recordPayment(data, URL_NAME);
+      }
+
+      function openFUModal() {
+        document.getElementById('fu-modal').classList.add('show');
+        _setDefaultDates();
+      }
+      function closeFUModal() {
+        document.getElementById('fu-modal').classList.remove('show');
+        window._fuIsRetail = false;
+        window._fuOutstandingAmt = 0;
+        // Reset all FU form fields
+        ['fu-notes','fu-contact','fu-promise-amt','fu-attach','fu-party-id','fu-party-code','fu-party-name',
+         'fu-promise-date','fu-next-date','fu-next'].forEach(id => { const e = document.getElementById(id); if(e) e.value=''; });
+        const mi = document.getElementById('fu-mode-inp'); if(mi) mi.value='Phone Call';
+        const pr = document.getElementById('fu-priority'); if(pr) pr.value='Medium';
+        const es = document.getElementById('fu-escalated'); if(es) es.value='No';
+        const eb = document.getElementById('fu-escalated-to-box'); if(eb) eb.style.display='none';
+        const et = document.getElementById('fu-escalated-to'); if(et) et.value='';
+        const inp = document.getElementById('fu-ss-inp'); if(inp) inp.value='';
+        if(_ssState && _ssState['fu-ss']){ _ssState['fu-ss'].value=''; _ssState['fu-ss'].text=''; }
+        // Restore party label if it was switched for retail
+        var partyLabel = document.querySelector('#fu-modal label.form-label');
+        // Show invoice row again
+        var invGroup = document.getElementById('fu-invoice');
+        if (invGroup && invGroup.closest) {
+          var g = invGroup.closest('.form-group');
+          if (g) g.style.display = '';
+        }
+        _setDefaultDates();
+      }
+
+      function toggleEscalation() {
+        const v = document.getElementById('fu-escalated').value;
+        document.getElementById('fu-escalated-to-box').style.display = v === 'Yes' ? 'block' : 'none';
+      }
+
+      function openFUModalForParty(partyID, invoiceID) {
+        openFUModal();
+        const p = (DB.parties || []).find(x => x.partyID === partyID);
+        if (!p) return;
+        const s = id => document.getElementById(id);
+        if (s('fu-party-id')) s('fu-party-id').value = p.partyID;
+        if (s('fu-party-code')) s('fu-party-code').value = p.partyCode || '';
+        if (s('fu-party-name')) s('fu-party-name').value = p.name;
+        const inp = document.getElementById('fu-ss-inp');
+        if (inp) inp.value = p.name;
+        if (_ssState['fu-ss']) { _ssState['fu-ss'].value = p.partyID; _ssState['fu-ss'].text = p.name; }
+        onFUParty(partyID);
+        if (invoiceID) {
+          setTimeout(() => {
+            const sel = document.getElementById('fu-invoice');
+            if (sel) sel.value = invoiceID;
+          }, 100);
+        }
+      }
+
+      function onFUParty(partyID) {
+        const pending_inv = (DB.invoices || []).filter(i => i.partyID === partyID && !isPaid(i));
+        const sel = document.getElementById('fu-invoice');
+        sel.innerHTML = '<option value="">-- All pending invoices --</option>';
+        pending_inv.forEach(i => sel.add(new Option(`${i.invoiceNo}  ${INR(pending(i))}`, i.invoiceID)));
+        const out = pending_inv.reduce((s, i) => s + pending(i), 0);
+        document.getElementById('fu-party-id').value = partyID;
+        const pi = (DB.parties || []).find(x => x.partyID === partyID);
+        if (pi) {
+          document.getElementById('fu-party-code').value = pi.partyCode || '';
+          document.getElementById('fu-party-name').value = pi.name;
+        }
+        const hasOD = pending_inv.some(i => daysOD(i) > 0);
+        document.getElementById('fu-priority').value = hasOD ? 'High' : 'Medium';
+        window._fuOutstandingAmt = out;
+      }
+
+      function submitFollowUp() {
+        const partyID = document.getElementById('fu-party-id').value;
+        const partyNameVal = (document.getElementById('fu-party-name').value || '').trim();
+        const notes = (document.getElementById('fu-notes').value || '').trim();
+        const isRetailFU = (window._fuIsRetail === true) || (partyID === 'RETAIL');
+        if (!isRetailFU && !partyID) { Swal.fire('Required', 'Select a party', 'warning'); return; }
+        if (isRetailFU && !partyNameVal) { Swal.fire('Required', 'Select a retail customer', 'warning'); return; }
+        if (!notes) { Swal.fire('Required', 'Notes are required', 'warning'); return; }
+
+        const invEl = document.getElementById('fu-invoice');
+        const selInvID = invEl ? invEl.value : '';
+        const selInv = (DB.invoices || []).find(i => i.invoiceID === selInvID);
+        let outAmt = window._fuOutstandingAmt || 0;
+        if (!isRetailFU) {
+          outAmt = outAmt || (DB.invoices || []).filter(i => i.partyID === partyID && !isPaid(i)).reduce((s, i) => s + pending(i), 0);
+        }
+
+        const dtRaw = document.getElementById('fu-dt').value;
+        const fmtDT = dtRaw ? dtRaw.replace('T', ' ') : '';
+        const fmtDate = d => d ? (() => { const dt = new Date(d); return String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0') + '/' + dt.getFullYear(); })() : '';
+
+        const data = {
+          partyID: isRetailFU ? 'RETAIL' : partyID,
+          partyCode: isRetailFU ? 'RETAIL' : document.getElementById('fu-party-code').value,
+          partyName: partyNameVal || document.getElementById('fu-party-name').value,
+          datetime: fmtDT,
+          mode: document.getElementById('fu-mode-inp').value,
+          contactPerson: document.getElementById('fu-contact').value,
+          outstandingAmt: outAmt,
+          invoiceID: selInvID,
+          invoiceNo: selInv ? selInv.invoiceNo : '',
+          notes,
+          promiseAmt: parseFloat(document.getElementById('fu-promise-amt').value) || 0,
+          promiseDate: fmtDate(document.getElementById('fu-promise-date').value),
+          promiseKept: 'Pending',
+          nextAction: document.getElementById('fu-next').value,
+          nextActionDate: fmtDate(document.getElementById('fu-next-date').value),
+          priority: document.getElementById('fu-priority').value,
+          escalated: document.getElementById('fu-escalated').value,
+          escalatedTo: document.getElementById('fu-escalated-to').value,
+          attachmentURL: document.getElementById('fu-attach').value
+        };
+
+        Swal.fire({ title: 'Saving...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+        google.script.run
+          .withSuccessHandler(r => {
+            if (r.success) {
+              Swal.fire({ icon: 'success', title: 'Follow-up Logged!', text: r.msg, timer: 1800, showConfirmButton: false });
+              closeFUModal();
+              _silentDataRefresh();
+              if (typeof renderRetailFollowups === 'function' && document.getElementById('view-retailFollowups') && document.getElementById('view-retailFollowups').classList.contains('active')) {
+                setTimeout(function() { renderRetailFollowups(); }, 600);
+              }
+            } else Swal.fire('Error', r.error, 'error');
+          })
+          .withFailureHandler(e => Swal.fire('Error', e.message, 'error'))
+          .saveFollowUp(data, URL_NAME);
+      }
+
+      function updatePromise(followUpID, kept) {
+        google.script.run
+          .withSuccessHandler(r => {
+            if (r.success) {
+              _silentDataRefresh();
+              Swal.fire({ icon: 'success', title: 'Updated!', timer: 1200, showConfirmButton: false });
+            }
+          })
+          .updatePromiseKept(followUpID, kept, URL_NAME);
+      }
+
+      function sdInit(wrapId, options, onSelect, placeholder) {
+        const wrap = document.getElementById(wrapId);
+        if (!wrap) return;
+        wrap.className = 'sd-wrap';
+        const ph = placeholder || 'Select party...';
+        wrap.innerHTML = `
+    <div class="sd-input" id="${wrapId}-inp" tabindex="0" onclick="sdOpen('${wrapId}')">${ph}</div>
+    <div class="sd-drop" id="${wrapId}-drop">
+      <div class="sd-search-box">
+        <input class="sd-search" id="${wrapId}-srch" placeholder="Search..."
+          oninput="sdFilter('${wrapId}')" onclick="event.stopPropagation()" autocomplete="off">
+      </div>
+      <div class="sd-list" id="${wrapId}-list"></div>
+    </div>`;
+        wrap._options = options;
+        wrap._onSelect = onSelect;
+        wrap._value = '';
+        sdRenderList(wrapId, options);
+        document.addEventListener('click', e => {
+          if (!e.target.closest('#' + wrapId)) sdClose(wrapId);
+        });
+      }
+
+      function sdRenderList(wrapId, opts) {
+        const list = document.getElementById(wrapId + '-list');
+        if (!list) return;
+        if (!opts.length) { list.innerHTML = '<div class="sd-empty">No results</div>'; return; }
+        list.innerHTML = opts.map(o =>
+          `<div class="sd-option" onclick="sdSelect('${wrapId}','${escQ(o.value)}','${escQ(o.label)}')" data-val="${escQ(o.value)}">
+      ${o.label}${o.sub ? `<div class="sd-sub">${o.sub}</div>` : ''}
+    </div>`
+        ).join('');
+      }
+
+      function sdFilter(wrapId) {
+        const wrap = document.getElementById(wrapId);
+        const q = (document.getElementById(wrapId + '-srch').value || '').toLowerCase();
+        const filtered = (wrap._options || []).filter(o =>
+          o.label.toLowerCase().includes(q) || (o.sub || '').toLowerCase().includes(q)
+        );
+        sdRenderList(wrapId, filtered);
+      }
+
+      function sdOpen(wrapId) {
+        document.querySelectorAll('.sd-drop.open').forEach(d => {
+          if (d.id !== wrapId + '-drop') d.classList.remove('open');
+        });
+        const drop = document.getElementById(wrapId + '-drop');
+        if (drop) drop.classList.toggle('open');
+        const srch = document.getElementById(wrapId + '-srch');
+        if (srch) setTimeout(() => srch.focus(), 50);
+      }
+
+      function sdClose(wrapId) {
+        const drop = document.getElementById(wrapId + '-drop');
+        if (drop) drop.classList.remove('open');
+      }
+
+      function sdSelect(wrapId, value, label) {
+        const wrap = document.getElementById(wrapId);
+        const inp = document.getElementById(wrapId + '-inp');
+        if (inp) inp.textContent = label;
+        if (inp) inp.style.color = 'var(--text)';
+        if (wrap) wrap._value = value;
+        sdClose(wrapId);
+        if (wrap && wrap._onSelect) wrap._onSelect(value, label);
+      }
+
+      function sdSetOptions(wrapId, options) {
+        const wrap = document.getElementById(wrapId);
+        if (!wrap) return;
+        wrap._options = options;
+        sdRenderList(wrapId, options);
+        sdFilter(wrapId);
+      }
+
+      function sdGetValue(wrapId) {
+        const wrap = document.getElementById(wrapId);
+        return wrap ? (wrap._value || '') : '';
+      }
+
+      function sdReset(wrapId, placeholder) {
+        const wrap = document.getElementById(wrapId);
+        const inp = document.getElementById(wrapId + '-inp');
+        if (inp) { inp.textContent = placeholder || 'Select party...'; inp.style.color = 'var(--sub)'; }
+        if (wrap) wrap._value = '';
+        const srch = document.getElementById(wrapId + '-srch');
+        if (srch) srch.value = '';
+        if (wrap && wrap._options) sdRenderList(wrapId, wrap._options);
+      }
+
+      function _partyOptions(includeAll) {
+        const opts = includeAll ? [{ value: '', label: 'All Parties', sub: '' }] : [];
+        return opts.concat((DB.parties || []).map(p => ({
+          value: p.partyID,
+          label: p.name,
+          sub: [p.partyCode, p.city, p.head].filter(Boolean).join('  ')
+        })));
+      }
+
+      let _csvParsed = [];
+
+      function handleDrop(e) {
+        e.preventDefault();
+        document.getElementById('drop-zone').style.borderColor = '';
+        if (e.dataTransfer.files[0]) routeFile(e.dataTransfer.files[0]);
+      }
+      function handleFile(inp) { if (inp.files[0]) routeFile(inp.files[0]); }
+
+      function routeFile(file) {
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (ext === 'pdf') { processPDFFile(file); return; }
+        processFile(file);
+      }
+
+      // ============================================================
+      // PDF INVOICE IMPORT — parses the Fresko multi-invoice Tally PDF
+      // (one invoice per page, or per group of pages for long item lists)
+      // entirely client-side via pdf.js. Produces the same _csvParsed
+      // shape the CSV/Excel path produces, so uploadCSV() works unchanged.
+      // ============================================================
+      async function processPDFFile(file) {
+        document.getElementById('csv-status').style.display = 'none';
+        if (typeof pdfjsLib === 'undefined') {
+          if (window.__loadHeavyLibs) window.__loadHeavyLibs();
+          showCSVStatus('error', 'PDF parser is still loading. Please wait a moment and try again.');
+          return;
+        }
+        const dz = document.getElementById('drop-zone');
+        if (dz) { dz.style.opacity = '.5'; dz.style.pointerEvents = 'none'; }
+        const prog = document.getElementById('pdf-progress');
+        const progBar = document.getElementById('pdf-progress-bar');
+        const progTxt = document.getElementById('pdf-progress-txt');
+        if (prog) prog.style.display = 'block';
+        try {
+          const buf = await file.arrayBuffer();
+          const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+          const totalPages = pdf.numPages;
+          const extracted = [], badPages = [];
+          const MONTHS = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+          for (let p = 1; p <= totalPages; p++) {
+            if (progBar) progBar.style.width = Math.round((p/totalPages)*100)+'%';
+            if (progTxt) progTxt.textContent = 'Reading page '+p+' of '+totalPages+'...';
+            const page = await pdf.getPage(p);
+            const tc = await page.getTextContent();
+            const strs = tc.items.map(it => it.str).filter(s => s.trim() !== '');
+            if (!strs.some(s => s.includes('INVOICE TOTAL'))) continue;
+            let invNo=null, invDate=null, partyName=null, billValue=null, marketChg=null, netAmt=null;
+            for (const s of strs) { const m=s.match(/^(\d{4}-\d{2}\/\d+)$/); if(m){invNo=m[1];break;} }
+            for (const s of strs) { const m=s.match(/^(\d{1,2})-([A-Za-z]+)-(\d{4})/); if(m){const mm=MONTHS[m[2].slice(0,3).toLowerCase()];if(mm)invDate=m[1].padStart(2,'0')+'/'+String(mm).padStart(2,'0')+'/'+m[3];break;} }
+            for (let i=0;i<strs.length;i++) {
+              if (strs[i]==='Party Name'||strs[i].startsWith('Party Name')) {
+                for (let b=i-1;b>=Math.max(0,i-5);b--) {
+                  const cand=strs[b].trim();
+                  if(cand.length>2&&!/^(INVOICE|AGRONICO|Page |MAIL|MSME|:)/.test(cand)&&!/^\d{1,2}-[A-Za-z]+-\d{4}/.test(cand)&&!/^[0-9]{2}[A-Z]/.test(cand)){partyName=cand.replace(/\s{2,}/g,' ');break;}
+                }
+                break;
+              }
+            }
+            for (let i=0;i<strs.length;i++) {
+              if (strs[i].includes('INVOICE TOTAL')) {
+                const nums=[];
+                for(let j=i+1;j<Math.min(i+5,strs.length);j++){const m=strs[j].match(/^([\d,]+\.\d{2})$/);if(m)nums.push(parseFloat(m[1].replace(/,/g,'')));if(nums.length===2)break;}
+                if(nums.length>=1)billValue=nums[0];if(nums.length>=2)marketChg=nums[1];
+              }
+              if (strs[i].includes('Net Amt')) {
+                const m=strs[i].match(/Net\s*Amt\s*:?\s*([\d,]+\.\d{2})/i);
+                if(m){netAmt=parseFloat(m[1].replace(/,/g,''));}
+                else if(i+1<strs.length){const m2=strs[i+1].match(/^([\d,]+\.\d{2})$/);if(m2)netAmt=parseFloat(m2[1].replace(/,/g,''));}
+              }
+            }
+            if(!netAmt&&billValue)netAmt=billValue;
+            if(!invNo||!invDate||!partyName||!netAmt){badPages.push(p);continue;}
+            extracted.push({invoiceNo:invNo,invoiceDate:invDate,partyName:partyName.slice(0,120),billValue:billValue||netAmt,marketChg:marketChg||0,netAmt:netAmt,page:p});
+          }
+          if(dz){dz.style.opacity='';dz.style.pointerEvents='';}
+          if(prog)prog.style.display='none';
+          if(!extracted.length){showCSVStatus('error',badPages.length?'No invoices could be read ('+badPages.length+' page(s) had an unrecognized layout).':'No invoices found in this PDF.');return;}
+          _buildPreviewFromPDFInvoices(extracted,file,totalPages,badPages);
+        } catch(err) {
+          if(dz){dz.style.opacity='';dz.style.pointerEvents='';}
+          if(prog)prog.style.display='none';
+          showCSVStatus('error','Error reading PDF: '+err.message);
+        }
+      }
+      function _buildPreviewFromPDFInvoices(rows, file, totalPages, badPages) {
+        _csvParsed = [];
+        const preview = [];
+        let validCnt = 0, skipCnt = 0;
+
+        const existingNos = new Set((DB.invoices || []).map(i => (i.invoiceNo || '').toLowerCase()));
+        const partyByName = {};
+        (DB.parties || []).forEach(p => { if (p.name) partyByName[p.name.toLowerCase()] = p; });
+
+        rows.forEach(r => {
+          const nameRaw = r.partyName || '';
+          let party = partyByName[nameRaw.toLowerCase()] || null;
+          if (!party && nameRaw.length >= 4) {
+            const slug = nameRaw.toLowerCase().slice(0, 8);
+            const key = Object.keys(partyByName).find(k => k.startsWith(slug));
+            if (key) party = partyByName[key];
+          }
+
+          const parts = r.invoiceDate.split('/'); // DD/MM/YYYY
+          let bd = null;
+          if (parts.length === 3) bd = new Date(+parts[2], +parts[1] - 1, +parts[0]);
+          if (!bd || isNaN(bd)) return;
+
+          const pad = n => String(n).padStart(2, '0');
+          const billDateStr = pad(bd.getDate()) + '/' + pad(bd.getMonth() + 1) + '/' + bd.getFullYear();
+
+          let dueDays = 30, slabPct = '0';
+          if (party) {
+            if (party.days15) { dueDays = party.days15; slabPct = '1.5'; }
+            else if (party.days1) { dueDays = party.days1; slabPct = '1'; }
+            else if (party.days0) { dueDays = party.days0; slabPct = '0'; }
+          }
+          const dueD = new Date(bd); dueD.setDate(dueD.getDate() + dueDays);
+          const dueDateStr = pad(dueD.getDate()) + '/' + pad(dueD.getMonth() + 1) + '/' + dueD.getFullYear();
+
+          const isDup = r.invoiceNo && existingNos.has(r.invoiceNo.toLowerCase());
+          let status = 'ok';
+          if (!party) status = 'warn';
+          if (isDup || !r.invoiceNo || !r.netAmt) status = 'skip';
+          status === 'skip' ? skipCnt++ : validCnt++;
+
+          const displayName = party ? party.name : (nameRaw || '?');
+          preview.push({ billNo: r.invoiceNo, dateRaw: billDateStr, billDateStr, dueDateStr, amount: r.netAmt, party, displayName, slabPct, dueDays, status });
+
+          if (status !== 'skip') {
+            _csvParsed.push({
+              partyID: party ? party.partyID : '',
+              partyCode: party ? party.partyCode : '',
+              partyName: party ? party.name : nameRaw,
+              invoiceNo: r.invoiceNo,
+              invoiceDate: billDateStr,
+              dueDate: dueDateStr,
+              dueDays,
+              slabPct,
+              billValue: r.billValue || r.netAmt,
+              cgst: 0,
+              sgst: 0,
+              igst: 0,
+              tcs: 0,
+              otherDed: r.marketChg || 0,
+              netAmount: r.netAmt,
+              vehicleNo: '',
+              head: party ? (party.head || '') : '',
+              remarks: 'Imported from PDF (page ' + r.page + ')'
+            });
+          }
+        });
+
+        document.getElementById('csv-fname').textContent = file.name;
+        document.getElementById('csv-fmeta').textContent =
+          `${(file.size / 1024 / 1024).toFixed(2)} MB  ${totalPages} pages  ${rows.length} invoices found` +
+          (badPages.length ? `  ${badPages.length} page(s) unreadable` : '');
+        document.getElementById('csv-file-info').style.display = 'flex';
+        txt('csv-valid-cnt', '[OK] ' + validCnt + ' ready');
+        txt('csv-skip-cnt', skipCnt > 0 ? '[X] ' + skipCnt + ' skip' : '');
+        txt('csv-total-cnt', rows.length + ' total invoices');
+
+        document.getElementById('csv-preview-tbl').innerHTML =
+          `<thead><tr>
+          <th>#</th><th>Invoice No</th><th>Date</th><th>Party</th>
+          <th class="num">Net Amt</th><th>Slab</th><th>Due Date</th><th>Status</th>
+        </tr></thead>
+        <tbody>
+        ${preview.slice(0, 10).map((r, i) => `
+          <tr style="background:${r.status === 'skip' ? '#FCE8E6' : r.status === 'warn' ? '#FEF7E0' : ''}">
+            <td style="color:var(--sub)">${i + 1}</td>
+            <td style="font-family:monospace;font-weight:600">${r.billNo || '--'}</td>
+            <td style="font-size:11px">${r.billDateStr}</td>
+            <td style="max-width:120px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px"
+                title="${r.displayName}">${r.displayName}</td>
+            <td class="num">${INR(r.amount)}</td>
+            <td>${slabBadge(r.slabPct)}</td>
+            <td style="font-size:10px">${r.dueDateStr}</td>
+            <td>${r.status === 'ok'
+                  ? '<span class="badge badge-paid">[OK] OK</span>'
+                  : r.status === 'warn'
+                    ? '<span class="badge badge-partpaid">[!] No Party</span>'
+                    : '<span class="badge badge-overdue">[X] Skip</span>'}</td>
+          </tr>`).join('')}
+        ${preview.length > 10
+            ? `<tr><td colspan="8" class="center" style="color:var(--sub);font-size:11px;padding:8px">
+              + ${preview.length - 10} more rows...
+             </td></tr>` : ''}
+        </tbody>`;
+        document.getElementById('csv-preview-box').style.display = 'block';
+
+        const btn = document.getElementById('csv-upload-btn');
+        btn.disabled = validCnt === 0;
+        btn.style.opacity = validCnt > 0 ? '1' : '0.5';
+        btn.innerHTML = `<i class="fas fa-cloud-upload-alt"></i> Upload ${validCnt} invoices to SalesInvoices`;
+
+        if (badPages.length) {
+          showCSVStatus('warn', badPages.length + ' page(s) could not be read and were skipped (unrecognized layout): page ' + badPages.slice(0, 15).join(', ') + (badPages.length > 15 ? '...' : ''));
+        }
+      }
+
+      function processFile(file) {
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (!['csv', 'xlsx', 'xls'].includes(ext)) {
+          showCSVStatus('error', 'Please select a .csv, .xlsx or .pdf file only.'); return;
+        }
+        document.getElementById('csv-status').style.display = 'none';
+
+        const dz = document.getElementById('drop-zone');
+        if (dz) { dz.style.opacity = '.5'; dz.style.pointerEvents = 'none'; }
+
+        const reader = new FileReader();
+
+        reader.onload = function (ev) {
+          try {
+            let allRows = []; // 2D array -- allRows[rowIdx][colIdx]
+
+            if (ext === 'csv') {
+              const raw = ev.target.result.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+              const parseCSVLine = line => {
+                const res = []; let cur = ''; let inQ = false;
+                for (let i = 0; i < line.length; i++) {
+                  const ch = line[i];
+                  if (ch === '"') { inQ = !inQ; continue; }
+                  if (ch === ',' && !inQ) { res.push(cur.trim()); cur = ''; continue; }
+                  cur += ch;
+                }
+                res.push(cur.trim()); return res;
+              };
+              allRows = raw.split('\n').map(l => parseCSVLine(l));
+
+            } else {
+              if (typeof XLSX === 'undefined') {
+                if (window.__loadHeavyLibs) window.__loadHeavyLibs();
+                showCSVStatus('error', 'Excel parser not loaded. Please wait a moment and try again.'); return;
+              }
+              const data = new Uint8Array(ev.target.result);
+              const wb = XLSX.read(data, { type: 'array', cellDates: false, raw: true });
+              const ws = wb.Sheets[wb.SheetNames[0]]; // First sheet
+              allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+            }
+
+            if (dz) { dz.style.opacity = ''; dz.style.pointerEvents = ''; }
+            if (!allRows.length) { showCSVStatus('error', 'File is empty.'); return; }
+
+            let headerRowIdx = -1;
+            let headers = [];
+            for (let i = 0; i < Math.min(15, allRows.length); i++) {
+              const cells = allRows[i].map(h =>
+                h.toString().toLowerCase()
+                  .replace(/[^a-z0-9.]/g, '_')
+                  .replace(/_+$/, '')
+                  .replace(/^_+/, '')
+              );
+              if (cells.some(c => c === 'date' || c === 'dt') &&
+                cells.some(c => c.includes('bill') || c.includes('name'))) {
+                headerRowIdx = i;
+                headers = cells;
+                break;
+              }
+            }
+
+            if (headerRowIdx === -1) {
+              showCSVStatus('error',
+                'Could not find header row (DATE, BILL NO. columns). ' +
+                'Make sure file is exported from accounting software in original format.'
+              ); return;
+            }
+
+            const dataRows = allRows.slice(headerRowIdx + 1);
+
+            const fc = (...names) => {
+              for (const n of names) {
+                const slug = n.toLowerCase().replace(/[^a-z0-9]/g, '');
+                const i = headers.findIndex(h => h.replace(/[^a-z0-9]/g, '').includes(slug));
+                if (i !== -1) return i;
+              }
+              return -1;
+            };
+
+            const colDate = fc('date', 'dt', 'billdate', 'invoicedate');
+            const colBillNo = fc('billno', 'bill_no', 'bill no', 'invoiceno', 'inv_no');
+            const colAmt = fc('net_value', 'netvalue', 'net value', 'net');
+
+            const colName = fc('name', 'partyname', 'party_name', 'party');
+            const colCode = fc('party_code', 'partycode', 'code');
+            const colCity = fc('city');
+            const colDesc = fc('description', 'desc', 'particulars', 'item');
+            const colGross = fc('bill_value', 'billvalue', 'bill value', 'gross');
+            const colCGST = fc('cgst', 'c_gst', 'c.gst');
+            const colSGST = fc('sgst', 's_gst', 's.gst');
+            const colIGST = fc('igst', 'i_gst', 'i.gst');
+            const colCess = fc('cess');
+            const colTCS = fc('tcs');
+            const colVeh = fc('vehicle_no', 'vehicleno', 'vehicle no', 'vehicle');
+
+            const colExpAll = [];
+            headers.forEach((h, i) => {
+              const slug = h.replace(/[^a-z0-9]/g, '');
+              if (/^exp\d*$/.test(slug) || slug === '194q' || slug.includes('tcs1h')) {
+                colExpAll.push(i);
+              }
+            });
+
+            const allCols = {
+              'Date': colDate,
+              'Party Name': colName,
+              'Bill No': colBillNo,
+              'Net Value': colAmt
+            };
+            document.getElementById('csv-map-grid').innerHTML = Object.entries(allCols).map(([k, v]) =>
+              `<div style="background:${v === -1 ? '#FCE8E6' : '#E6F4EA'};border:1px solid ${v === -1 ? '#F6AEA9' : '#A8DAB5'};border-radius:7px;padding:8px 10px">
+          <div style="font-size:10px;font-weight:700;color:var(--muted)">${k}</div>
+          <div style="font-size:11px;font-weight:600;color:${v === -1 ? 'var(--red)' : 'var(--green)'}">
+            ${v === -1 ? 'NOT FOUND' : 'Col ' + (v + 1) + ': ' + headers[v]}
+          </div>
+        </div>`
+            ).join('');
+            document.getElementById('csv-map-box').style.display = 'block';
+
+            if (colDate === -1 || colBillNo === -1 || colAmt === -1) {
+              showCSVStatus('error', 'Required columns not found. Need: DATE  BILL NO.  NET VALUE');
+              return;
+            }
+
+            const existingNos = new Set((DB.invoices || []).map(i => (i.invoiceNo || '').toLowerCase()));
+            const partyByCode = {};
+            const partyByName = {};
+            (DB.parties || []).forEach(p => {
+              if (p.partyCode) partyByCode[p.partyCode.toLowerCase()] = p;
+              if (p.name) partyByName[p.name.toLowerCase()] = p;
+            });
+
+            _csvParsed = [];
+            const preview = [];
+            let validCnt = 0, skipCnt = 0;
+
+            const safeStr = v => (v === null || v === undefined) ? '' : v.toString().trim();
+            const safeN = (row, i) => i !== -1 ? (parseFloat(safeStr(row[i]).replace(/[,₹\s]/g, '')) || 0) : 0;
+
+            dataRows.forEach(row => {
+              if (!row || row.length === 0) return;
+              if (row.every(c => safeStr(c) === '')) return;
+
+              const billNo = safeStr(row[colBillNo]);
+              const dateRaw = safeStr(row[colDate]);
+              const amount = safeN(row, colAmt);
+
+              const rowJoined = row.map(safeStr).join(' ').toUpperCase();
+              if (rowJoined.includes('TOTAL') && !billNo) return;
+              if (!billNo && !amount) return;
+
+              const nameRaw = safeStr(colName !== -1 ? row[colName] : '');
+              const codeRaw = safeStr(colCode !== -1 ? row[colCode] : '');
+
+              let party = null;
+              if (codeRaw) party = partyByCode[codeRaw.toLowerCase()] || null;
+              if (!party && nameRaw) {
+                party = partyByName[nameRaw.toLowerCase()] || null;
+                if (!party && nameRaw.length >= 4) {
+                  const slug = nameRaw.toLowerCase().slice(0, 8);
+                  const key = Object.keys(partyByName).find(k => k.startsWith(slug));
+                  if (key) party = partyByName[key];
+                }
+              }
+
+              let billDateStr = '', dueDateStr = '';
+              let bd = null;
+              const dv = safeStr(row[colDate]);
+
+              if (!isNaN(dv) && dv !== '' && +dv > 1000) {
+                const d = XLSX.SSF.parse_date_code(+dv);
+                if (d) bd = new Date(d.y, d.m - 1, d.d);
+              } else {
+                const parts = dv.split(/[-\/]/);
+                if (parts.length === 3) {
+                  if (parts[0].length === 4) bd = new Date(+parts[0], +parts[1] - 1, +parts[2]);
+                  else bd = new Date(+parts[2], +parts[1] - 1, +parts[0]);
+                }
+              }
+              if (!bd || isNaN(bd)) return;
+
+              const pad = n => String(n).padStart(2, '0');
+              billDateStr = pad(bd.getDate()) + '/' + pad(bd.getMonth() + 1) + '/' + bd.getFullYear();
+
+              let dueDays = 30, slabPct = '0';
+              if (party) {
+                if (party.days15) { dueDays = party.days15; slabPct = '1.5'; }
+                else if (party.days1) { dueDays = party.days1; slabPct = '1'; }
+                else if (party.days0) { dueDays = party.days0; slabPct = '0'; }
+              }
+              const dueD = new Date(bd); dueD.setDate(dueD.getDate() + dueDays);
+              dueDateStr = pad(dueD.getDate()) + '/' + pad(dueD.getMonth() + 1) + '/' + dueD.getFullYear();
+
+              const isDup = billNo && existingNos.has(billNo.toLowerCase());
+              let status = 'ok';
+              if (!party) status = 'warn';
+              if (isDup || !billNo || !amount) status = 'skip';
+              status === 'skip' ? skipCnt++ : validCnt++;
+
+              const displayName = party ? party.name : (nameRaw || codeRaw || '?');
+              preview.push({ billNo, dateRaw: billDateStr, billDateStr, dueDateStr, amount, party, displayName, slabPct, dueDays, status });
+
+              if (status !== 'skip') {
+                _csvParsed.push({
+                  partyID: party ? party.partyID : '',
+                  partyCode: party ? party.partyCode : codeRaw,
+                  partyName: party ? party.name : (nameRaw || codeRaw || ''),
+                  invoiceNo: billNo,
+                  invoiceDate: billDateStr,
+                  dueDate: dueDateStr,
+                  dueDays,
+                  slabPct,
+                  billValue: safeN(row, colGross) || amount,
+                  cgst: safeN(row, colCGST),
+                  sgst: safeN(row, colSGST),
+                  igst: safeN(row, colIGST),
+                  tcs: safeN(row, colTCS),
+                  otherDed: colExpAll.reduce((s, i) => s + safeN(row, i), 0) + safeN(row, colCess),
+                  netAmount: amount,
+                  vehicleNo: safeStr(colVeh !== -1 ? row[colVeh] : ''),
+                  head: safeStr(colDesc !== -1 ? row[colDesc] : '') || (party ? (party.head || '') : ''),
+                  remarks: ''
+                });
+              }
+            });
+
+            document.getElementById('csv-fname').textContent = file.name;
+            document.getElementById('csv-fmeta').textContent =
+              `${(file.size / 1024).toFixed(1)} KB  ${dataRows.length} rows  header at row ${headerRowIdx + 1}`;
+            document.getElementById('csv-file-info').style.display = 'flex';
+            txt('csv-valid-cnt', '[OK] ' + validCnt + ' ready');
+            txt('csv-skip-cnt', skipCnt > 0 ? '[X] ' + skipCnt + ' skip' : '');
+            txt('csv-total-cnt', dataRows.length + ' total rows');
+
+            document.getElementById('csv-preview-tbl').innerHTML =
+              `<thead><tr>
+          <th>#</th><th>Bill No</th><th>Date</th><th>Party</th>
+          <th class="num">Net Amt</th><th>Slab</th><th>Due Date</th><th>Status</th>
+        </tr></thead>
+        <tbody>
+        ${preview.slice(0, 10).map((r, i) => `
+          <tr style="background:${r.status === 'skip' ? '#FCE8E6' : r.status === 'warn' ? '#FEF7E0' : ''}">
+            <td style="color:var(--sub)">${i + 1}</td>
+            <td style="font-family:monospace;font-weight:600">${r.billNo || '--'}</td>
+            <td style="font-size:11px">${r.billDateStr}</td>
+            <td style="max-width:120px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px"
+                title="${r.displayName}">${r.displayName}</td>
+            <td class="num">${INR(r.amount)}</td>
+            <td>${slabBadge(r.slabPct)}</td>
+            <td style="font-size:10px">${r.dueDateStr}</td>
+            <td>${r.status === 'ok'
+                  ? '<span class="badge badge-paid">[OK] OK</span>'
+                  : r.status === 'warn'
+                    ? '<span class="badge badge-partpaid">[!] No Party</span>'
+                    : '<span class="badge badge-overdue">[X] Skip</span>'}</td>
+          </tr>`).join('')}
+        ${preview.length > 10
+                ? `<tr><td colspan="8" class="center" style="color:var(--sub);font-size:11px;padding:8px">
+              + ${preview.length - 10} more rows...
+             </td></tr>` : ''}
+        </tbody>`;
+            document.getElementById('csv-preview-box').style.display = 'block';
+
+            const btn = document.getElementById('csv-upload-btn');
+            btn.disabled = validCnt === 0;
+            btn.style.opacity = validCnt > 0 ? '1' : '0.5';
+            btn.innerHTML = `<i class="fas fa-cloud-upload-alt"></i> Upload ${validCnt} invoices to SalesInvoices`;
+
+          } catch (err) {
+            if (dz) { dz.style.opacity = ''; dz.style.pointerEvents = ''; }
+            showCSVStatus('error', 'Error reading file: ' + err.message);
+          }
+        };
+
+        if (ext === 'csv') {
+          reader.readAsText(file, 'UTF-8');
+        } else {
+          reader.readAsArrayBuffer(file);
+        }
+      }
+
+      function clearCSV() {
+        _csvParsed = [];
+        document.getElementById('csv-inp').value = '';
+        document.getElementById('csv-file-info').style.display = 'none';
+        document.getElementById('csv-preview-box').style.display = 'none';
+        document.getElementById('csv-map-box').style.display = 'none';
+        document.getElementById('csv-status').style.display = 'none';
+        const pdfProg = document.getElementById('pdf-progress');
+        if (pdfProg) pdfProg.style.display = 'none';
+        const btn = document.getElementById('csv-upload-btn');
+        btn.disabled = true; btn.style.opacity = '0.5';
+        btn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Upload to SalesInvoices';
+      }
+
+      function showCSVStatus(type, msg) {
+        const el = document.getElementById('csv-status');
+        el.className = 'info-box ' + (type === 'success' ? 'green' : type === 'warn' ? 'amber' : 'red');
+        el.innerHTML = `<i class="fas fa-${type === 'success' ? 'check-circle' : type === 'warn' ? 'exclamation-triangle' : 'exclamation-circle'}"></i><span>${msg}</span>`;
+        el.style.display = 'flex';
+      }
+
+      function uploadCSV() {
+        if (!_csvParsed.length) { showCSVStatus('warn', 'No valid rows to upload.'); return; }
+
+        var total  = _csvParsed.length;
+        var chunks = Math.ceil(total / 10);
+        var btn    = document.getElementById('csv-upload-btn');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+
+        // Show live progress panel
+        var statusEl = document.getElementById('csv-status');
+        statusEl.className = 'info-box blue';
+        statusEl.style.display = 'flex';
+        statusEl.innerHTML =
+          '<div style="width:100%">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
+              '<span style="font-weight:700;font-size:13px"><i class="fas fa-cloud-upload-alt" style="margin-right:6px"></i>Uploading Invoices</span>' +
+              '<span id="up-counter" style="font-size:13px;font-weight:800;color:#1967D2">0 / ' + total + '</span>' +
+            '</div>' +
+            '<div style="background:#BFDBFE;border-radius:6px;height:10px;overflow:hidden;margin-bottom:6px">' +
+              '<div id="up-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#4285F4,#1967D2);border-radius:6px;transition:width .4s ease"></div>' +
+            '</div>' +
+            '<div style="display:flex;justify-content:space-between;font-size:11px;color:#1967D2">' +
+              '<span id="up-status">Starting batch 1 of ' + chunks + '...</span>' +
+              '<span id="up-pct">0%</span>' +
+            '</div>' +
+          '</div>';
+
+        // Progress callback — called by gas-api.js after each chunk completes
+        window.__uploadProgress = function(done, total, chunkDone, totalChunks) {
+          var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+          var bar = document.getElementById('up-bar');
+          var counter = document.getElementById('up-counter');
+          var status  = document.getElementById('up-status');
+          var pctEl   = document.getElementById('up-pct');
+          if (bar)     bar.style.width = pct + '%';
+          if (counter) counter.textContent = done + ' / ' + total;
+          if (status)  status.textContent  = 'Batch ' + (chunkDone + 1) + ' of ' + totalChunks + ' uploaded...';
+          if (pctEl)   pctEl.textContent   = pct + '%';
+        };
+
+        google.script.run
+          .withSuccessHandler(function(r) {
+            window.__uploadProgress = null;
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Upload to SalesInvoices';
+            if (r.success) {
+              // Show 100% briefly then success
+              var bar = document.getElementById('up-bar');
+              var counter = document.getElementById('up-counter');
+              if (bar)     bar.style.width = '100%';
+              if (counter) counter.textContent = r.rowsAdded + ' / ' + total;
+              setTimeout(function() {
+                showCSVStatus('success',
+                  '<i class="fas fa-check-circle" style="margin-right:6px"></i>' +
+                  '<span><b>' + r.rowsAdded + ' invoices uploaded successfully</b>' +
+                  (r.skipped > 0 ? ' &nbsp;(' + r.skipped + ' duplicates skipped)' : '') +
+                  '.</span>'
+                );
+              }, 400);
+              clearCSV();
+              _silentDataRefresh();
+            } else {
+              showCSVStatus('error', 'Upload failed: ' + (r.error || r.msg || 'Unknown error'));
+            }
+          })
+          .withFailureHandler(function(e) {
+            window.__uploadProgress = null;
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Upload to SalesInvoices';
+            showCSVStatus('error',
+              '<i class="fas fa-exclamation-circle" style="margin-right:6px"></i>' +
+              (e.message || 'Network error. Please try again.')
+            );
+          })
+          .bulkUploadInvoices(_csvParsed, '', URL_NAME);
+      }
+
+      function resetRptFilters() {
+        ['rpt-from', 'rpt-to'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+        try { sdReset('rpt-ss', 'All Parties'); } catch(e) { resetSS('rpt-ss'); }
+        loadReports();
+      }
+
+      function loadReports() {
+        if (!window._canViewAnalytics) { nav('dashboard'); return; }
+        const filters = {
+          partyID: sdGetValue('rpt-ss') || '',
+          from: (document.getElementById('rpt-from') || {}).value || '',
+          to: (document.getElementById('rpt-to') || {}).value || ''
+        };
+        google.script.run
+          .withSuccessHandler(data => {
+            if (!data.success) return;
+            buildCharts(data);
+          })
+          .getAnalytics(filters);
+      }
+
+      const C = { red: '#EA4335', dark: '#1C1C1C', grey: '#8A8A8A', green: '#34A853', amber: '#F9AB00', blue: '#1967D2' };
+
+      function mkChart(id, config) {
+        if (_charts[id]) { _charts[id].destroy(); }
+        const canvas = document.getElementById(id);
+        if (!canvas) return;
+        _charts[id] = new Chart(canvas, config);
+      }
+
+      function buildCharts(data) {
+        const inrK = v => v >= 1000000 ? '₹' + (v / 100000).toFixed(1) + 'L' : v >= 1000 ? '₹' + (v / 1000).toFixed(0) + 'K' : '₹' + v;
+
+        mkChart('ch-party', {
+          type: 'bar', data: {
+            labels: data.byParty.map(x => x.name.length > 16 ? x.name.slice(0, 15) + '...' : x.name),
+            datasets: [{
+              label: 'Outstanding', data: data.byParty.map(x => x.amt),
+              backgroundColor: data.byParty.map((_, i) => i === 0 ? C.red : i % 3 === 1 ? C.dark : C.grey),
+              borderRadius: 5, borderSkipped: false
+            }]
+          }, options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ' ' + INR(ctx.raw) } } },
+            scales: {
+              x: { grid: { display: false }, ticks: { font: { size: 9 }, maxRotation: 30, color: '#64748B' } },
+              y: { grid: { color: '#F1F5F9' }, ticks: { callback: v => inrK(v), font: { size: 9 }, color: '#64748B' } }
+            }
+          }
+        });
+
+        mkChart('ch-slab', {
+          type: 'doughnut', data: {
+            labels: ['1.5% Slab', '1% Slab', 'Nil Slab'],
+            datasets: [{
+              data: [data.slabMap['1.5'] || 0, data.slabMap['1'] || 0, data.slabMap['0'] || 0],
+              backgroundColor: [C.green, C.amber, C.grey], borderWidth: 2, borderColor: '#fff', hoverOffset: 4
+            }]
+          }, options: {
+            responsive: true, maintainAspectRatio: false, cutout: '65%',
+            plugins: {
+              legend: { position: 'bottom', labels: { font: { size: 10 }, padding: 12, usePointStyle: true } },
+              tooltip: { callbacks: { label: ctx => ' ' + INR(ctx.raw) } }
+            }
+          }
+        });
+
+        mkChart('ch-monthly', {
+          type: 'line', data: {
+            labels: data.monthlyColl.map(x => { const p = x.month.split('-'); return p[1] + '/' + p[0].slice(2); }),
+            datasets: [{
+              label: 'Collections', data: data.monthlyColl.map(x => x.amt),
+              borderColor: C.red, backgroundColor: 'rgba(192,21,42,0.08)',
+              pointBackgroundColor: C.red, pointRadius: 3, tension: 0.35, fill: true, borderWidth: 2
+            }]
+          }, options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ' ' + INR(ctx.raw) } } },
+            scales: {
+              x: { grid: { display: false }, ticks: { font: { size: 9 }, color: '#64748B' } },
+              y: { grid: { color: '#F1F5F9' }, ticks: { callback: v => inrK(v), font: { size: 9 }, color: '#64748B' } }
+            }
+          }
+        });
+
+        const statuses = Object.keys(data.statusMap);
+        const statColors = { Paid: C.green, Pending: C.blue, PartPaid: C.amber, Overdue: C.red, Disputed: '#7C3AED', Cancelled: C.grey };
+        mkChart('ch-status', {
+          type: 'bar', data: {
+            labels: statuses,
+            datasets: [{
+              data: statuses.map(s => data.statusMap[s]),
+              backgroundColor: statuses.map(s => statColors[s] || C.grey),
+              borderRadius: 5, borderSkipped: false
+            }]
+          }, options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { grid: { color: '#F1F5F9' }, ticks: { font: { size: 9 }, color: '#64748B' } },
+              y: { grid: { display: false }, ticks: { font: { size: 10, weight: '600' }, color: '#374151' } }
+            }
+          }
+        });
+
+        const bucketLabels = ['1-7d', '8-15d', '16-30d', '31-60d', '60d+'];
+        const bucketVals = [data.ageBuckets['1-7'], data.ageBuckets['8-15'], data.ageBuckets['16-30'], data.ageBuckets['31-60'], data.ageBuckets['60+']];
+        mkChart('ch-age', {
+          type: 'bar', data: {
+            labels: bucketLabels,
+            datasets: [{
+              data: bucketVals,
+              backgroundColor: ['#FEEFC3', '#FED7AA', '#FCA5A5', '#EE675C', C.red],
+              borderRadius: 5, borderSkipped: false
+            }]
+          }, options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ' ' + INR(ctx.raw) } } },
+            scales: {
+              x: { grid: { display: false }, ticks: { font: { size: 10 }, color: '#374151' } },
+              y: { grid: { color: '#F1F5F9' }, ticks: { callback: v => inrK(v), font: { size: 9 }, color: '#64748B' } }
+            }
+          }
+        });
+
+        const fuModes = Object.keys(data.fuModeMap);
+        mkChart('ch-fumode', {
+          type: 'polarArea', data: {
+            labels: fuModes,
+            datasets: [{
+              data: fuModes.map(m => data.fuModeMap[m]),
+              backgroundColor: ['rgba(59,130,246,.75)', 'rgba(34,197,94,.75)', 'rgba(192,21,42,.75)', 'rgba(107,114,128,.75)', 'rgba(168,85,247,.75)'],
+              borderWidth: 1, borderColor: '#fff'
+            }]
+          }, options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { position: 'bottom', labels: { font: { size: 10 }, padding: 10, usePointStyle: true } } }
+          }
+        });
+
+        const pt = data.promiseTotals;
+        mkChart('ch-promise', {
+          type: 'doughnut', data: {
+            labels: ['Kept', 'Broken', 'Partial', 'Awaiting'],
+            datasets: [{
+              data: [pt.kept, pt.broken, pt.partial, pt.pending],
+              backgroundColor: [C.green, C.red, C.amber, C.blue], borderWidth: 2, borderColor: '#fff', hoverOffset: 4
+            }]
+          }, options: {
+            responsive: true, maintainAspectRatio: false, cutout: '60%',
+            plugins: { legend: { position: 'bottom', labels: { font: { size: 10 }, padding: 10, usePointStyle: true } } }
+          }
+        });
+
+        const topEl = document.getElementById('rpt-top-overdue');
+        topEl.innerHTML = data.topOverdue.map((p, i) => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid #F8FAFC">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:10px;font-weight:700;width:18px;color:var(--muted)">${i + 1}</span>
+        <div>
+          <div style="font-size:12px;font-weight:600">${p.name}</div>
+          <div style="font-size:10px;color:var(--muted)">${p.count} invoice(s)  max ${p.maxDays}d OD</div>
+        </div>
+      </div>
+      <span style="font-size:12px;font-weight:700;color:var(--red)">${INR(p.amt)}</span>
+    </div>`).join('');
+      }
+
+
+      // ============================================================
+      // RENDER: FOLLOW-UPS (was missing)
+      // ============================================================
+      function renderFollowups() {
+        const q = ((document.getElementById('fu-search') || {}).value || '').toLowerCase();
+        const from = (document.getElementById('fu-from') || {}).value || '';
+        const to = (document.getElementById('fu-to') || {}).value || '';
+        const modeF = (document.getElementById('fu-mode-filter') || {}).value || '';
+
+        let list = (DB.followups || []).filter(f => {
+          if (f.partyID === 'RETAIL' || f.partyCode === 'RETAIL') return false; // retail FUs have own view
+          if (q && !((f.partyName||'').toLowerCase().includes(q) || (f.notes||'').toLowerCase().includes(q) || (f.invoiceNo||'').toLowerCase().includes(q))) return false;
+          if (modeF && f.mode !== modeF) return false;
+          if (from || to) {
+            const d = parseIST((f.datetime||'').split(' ')[0]);
+            if (from && d && d < new Date(from)) return false;
+            if (to && d && d > new Date(to + 'T23:59:59')) return false;
+          }
+          // filter pill
+          const fp = (document.querySelector('.fpill.active[data-fu-filter]') || {}).dataset;
+          const pill = fp && fp.fuFilter ? fp.fuFilter : '';
+          if (pill === 'escalated' && f.escalated !== 'Yes') return false;
+          if (pill === 'promise' && !f.promiseDate) return false;
+          return true;
+        }).sort((a, b) => (b.datetime || '').localeCompare(a.datetime || ''));
+
+        _filtered.followups = list;
+        txt('fu-sub', list.length + ' follow-up(s) logged');
+        txt('fu-count-badge', list.length);
+
+        const pg = _pState.followups || 1;
+        const page = list.slice((pg - 1) * PER, pg * PER);
+        txt('fu-info', ((pg-1)*PER+1) + '-' + Math.min(pg*PER, list.length) + ' of ' + list.length);
+        _updatePager('fu', pg, list.length);
+
+        const tbody = document.getElementById('fu-tbody');
+        if (!tbody) return;
+        if (!list.length) { tbody.innerHTML = emptyRow(9, 'No follow-ups found'); return; }
+
+        tbody.innerHTML = page.map(f => {
+          const bg = modeBg(f.mode);
+          const pkColor = f.promiseKept === 'Yes' ? 'var(--green)' : f.promiseKept === 'No' ? 'var(--red)' : 'var(--amber)';
+          return `<tr>
+            <td style="font-size:12px;font-weight:600;cursor:pointer" onclick="openPartyModal('${escQ(f.partyID)}')">${f.partyName}</td>
+            <td style="font-size:11px">${(f.datetime||'').split(' ')[0]}</td>
+            <td><span style="background:${bg};font-size:10px;padding:2px 7px;border-radius:10px">${f.mode||'-'}</span></td>
+            <td style="font-size:11px">${f.contactPerson||'-'}</td>
+            <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escQ(f.notes)}">${f.notes||'-'}</td>
+            <td class="num" style="font-size:11px">${f.promiseAmt > 0 ? INR(f.promiseAmt) : '-'}</td>
+            <td style="font-size:11px">${f.promiseDate||'-'}</td>
+            <td><span style="color:${pkColor};font-size:11px;font-weight:600">${f.promiseKept||'Pending'}</span></td>
+            <td style="white-space:nowrap">
+              ${f.promiseKept === 'Pending' ? `
+                <button class="act-btn" style="background:#E6F4EA;color:var(--green);border-color:#81C995" onclick="updatePromise('${escQ(f.followUpID)}','Yes')" title="Mark Kept"><i class="fas fa-check"></i></button>
+                <button class="act-btn" style="background:#FCE8E6;color:var(--red);border-color:#F6AEA9" onclick="updatePromise('${escQ(f.followUpID)}','No')" title="Mark Broken"><i class="fas fa-times"></i></button>
+              ` : ''}
+            </td>
+          </tr>`;
+        }).join('');
+      }
+
+      function setFUFilter(el, val) {
+        document.querySelectorAll('.fpill[data-fu-filter]').forEach(p => p.classList.remove('active'));
+        if (el) { el.classList.add('active'); el.dataset.fuFilter = val; }
+        renderFollowups();
+      }
+
+      // ============================================================
+      // RENDER: PROMISE TRACKER (was missing)
+      // ============================================================
+      function renderPromises() {
+        const pill = (document.querySelector('.promise-pill.active') || {}).dataset;
+        const filter = pill && pill.promiseFilter ? pill.promiseFilter : 'ALL';
+        const from = ((document.getElementById('pt-from')||{}).value||'');
+        const to   = ((document.getElementById('pt-to')||{}).value||'');
+        const today = new Date(); today.setHours(0,0,0,0);
+
+        const ptFrom = (document.getElementById('pt-from')||{}).value||'';
+        const ptTo   = (document.getElementById('pt-to')||{}).value||'';
+        let list = (DB.followups || []).filter(f => {
+          if (!f.promiseAmt && !f.promiseDate) return false;
+          if (ptFrom || ptTo) {
+            const fd = parseIST((f.datetime||'').split(' ')[0]);
+            if (ptFrom && fd && fd < new Date(ptFrom)) return false;
+            if (ptTo   && fd && fd > new Date(ptTo+'T23:59:59')) return false;
+          }
+          if (filter === 'ALL') return true;
+          if (filter === 'overdue-promise') {
+            const pd = f.promiseDate ? parseIST(f.promiseDate) : null;
+            return pd && pd < today && f.promiseKept === 'Pending';
+          }
+          return f.promiseKept === filter;
+        }).sort((a, b) => (a.promiseDate||'').localeCompare(b.promiseDate||''));
+
+        const kept = list.filter(f => f.promiseKept === 'Yes').length;
+        const broken = list.filter(f => f.promiseKept === 'No').length;
+        const partial = list.filter(f => f.promiseKept === 'Partial').length;
+        const pending = list.filter(f => f.promiseKept === 'Pending').length;
+
+        txt('pt-kept', kept); txt('pt-broken', broken); txt('pt-partial', partial); txt('pt-pending', pending);
+
+        const tbody = document.getElementById('pt-tbody');
+        if (!tbody) return;
+        if (!list.length) { tbody.innerHTML = emptyRow(8, 'No promises found'); return; }
+
+        tbody.innerHTML = list.map(f => {
+          const pd = f.promiseDate ? parseIST(f.promiseDate) : null;
+          const isOverdue = pd && pd < today && f.promiseKept === 'Pending';
+          const pkColor = f.promiseKept === 'Yes' ? 'var(--green)' : f.promiseKept === 'No' ? 'var(--red)' : isOverdue ? 'var(--red)' : 'var(--amber)';
+          return `<tr style="${isOverdue ? 'background:#FCE8E6' : ''}">
+            <td style="font-size:12px;font-weight:600;cursor:pointer" onclick="openPartyModal('${escQ(f.partyID)}')">${f.partyName}</td>
+            <td style="font-size:11px">${(f.datetime||'').split(' ')[0]}</td>
+            <td><span style="font-size:10px">${f.mode||'-'}</span></td>
+            <td class="num" style="font-weight:700;color:var(--green)">${INR(f.promiseAmt||0)}</td>
+            <td style="font-size:11px;${isOverdue ? 'color:var(--red);font-weight:700' : ''}">${f.promiseDate||'-'}</td>
+            <td><span style="color:${pkColor};font-size:11px;font-weight:600">${f.promiseKept||'Pending'}${isOverdue ? ' (OVERDUE)' : ''}</span></td>
+            <td style="font-size:11px">${f.nextAction||'-'}</td>
+            <td style="white-space:nowrap">
+              ${f.promiseKept === 'Pending' ? `
+                <button class="act-btn" style="background:#E6F4EA;color:var(--green);border-color:#81C995" onclick="updatePromise('${escQ(f.followUpID)}','Yes')" title="Kept"><i class="fas fa-check"></i></button>
+                <button class="act-btn" style="background:#FCE8E6;color:var(--red);border-color:#F6AEA9" onclick="updatePromise('${escQ(f.followUpID)}','No')" title="Broken"><i class="fas fa-times"></i></button>
+              ` : ''}
+            </td>
+          </tr>`;
+        }).join('');
+      }
+
+      function setPromiseFilter(el, val) {
+        document.querySelectorAll('.promise-pill').forEach(p => p.classList.remove('active'));
+        if (el) { el.classList.add('active'); el.dataset.promiseFilter = val; }
+        renderPromises();
+      }
+
+      // ============================================================
+      // RENDER: DISCOUNT TO BE GIVEN
+      // ============================================================
+      function dtbgPage(d) {
+        const list = _getDTBGList();
+        _pState.discountTBG = Math.max(1, Math.min(_pState.discountTBG + d, Math.ceil(list.length / PER)));
+        renderDiscountTBG();
+      }
+      function _getDTBGList() {
+        const q = ((document.getElementById('dtbg-search')||{}).value||'').toLowerCase();
+        const from = (document.getElementById('dtbg-from')||{}).value||'';
+        const to   = (document.getElementById('dtbg-to')||{}).value||'';
+        return (DB.payments||[]).filter(p => {
+          if ((p.discountToBeGiven||0) <= 0) return false;
+          if (q && !p.partyName.toLowerCase().includes(q) && !(p.paymentID||'').toLowerCase().includes(q)) return false;
+          if (from || to) {
+            const d = parseIST(p.paymentDate);
+            if (from && d && d < new Date(from)) return false;
+            if (to   && d && d > new Date(to+'T23:59:59')) return false;
+          }
+          return true;
+        }).sort((a,b) => (parseIST(b.paymentDate)||0) - (parseIST(a.paymentDate)||0));
+      }
+      function renderDiscountTBG() {
+        if (!window._canViewDTBG) { nav('dashboard'); return; }
+        const list = _getDTBGList();
+        const total = list.length;
+        const pg = _pState.discountTBG;
+        const page = list.slice((pg-1)*PER, pg*PER);
+        const totalDTBG = list.reduce((s,p) => s+(p.discountToBeGiven||0), 0);
+        txt('dtbg-sub', total + ' payments with pending discount');
+        const badge = document.getElementById('dtbg-total-badge');
+        if (badge) badge.textContent = INR(totalDTBG) + ' pending';
+        txt('dtbg-info', total > 0 ? ((pg-1)*PER+1)+'-'+Math.min(pg*PER,total)+' of '+total : '0 records');
+        _updatePager('dtbg', pg, total);
+        const tbody = document.getElementById('dtbg-tbody');
+        if (!tbody) return;
+        tbody.innerHTML = page.length === 0
+          ? emptyRow(10, 'No pending discount-to-be-given entries')
+          : page.map(p => {
+            const dtbg = p.discountToBeGiven || 0;
+            const dg   = p.discountGiven || 0;
+            return `<tr>
+              <td style="font-family:monospace;font-size:11px;font-weight:600">${p.paymentID}</td>
+              <td style="font-size:12px;font-weight:600;cursor:pointer" onclick="openPartyModal('${escQ(p.partyID)}')">${p.partyName}</td>
+              <td style="font-size:11px">${p.paymentDate}</td>
+              <td><span class="badge badge-pending" style="background:#E8F0FE;font-size:10px">${p.mode}</span></td>
+              <td class="num" style="font-weight:700;color:var(--green)">${INR(p.amount)}</td>
+              <td style="font-size:10px;color:var(--muted);max-width:120px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${p.appliedTo||'--'}</td>
+              <td class="num" style="font-weight:800;color:#7C3AED;font-size:13px">${INR(dtbg)}</td>
+              <td class="num" style="color:var(--green)">${dg > 0 ? INR(dg) : '--'}</td>
+              <td style="font-size:10px;color:var(--muted)">${p.recordedBy||'--'}</td>
+              <td><button class="act-btn ab-view" onclick="openPartyModal('${escQ(p.partyID)}')" title="View Party"><i class="fas fa-eye"></i></button></td>
+            </tr>`;
+          }).join('');
+      }
+
+      // ============================================================
+      // RENDER: WRITE-OFFS
+      // ============================================================
+      function woPage(d) {
+        const list = _getWriteOffList();
+        _pState.writeoffs = Math.max(1, Math.min(_pState.writeoffs + d, Math.ceil(list.length / PER)));
+        renderWriteOffs();
+      }
+      function _getWriteOffList() {
+        const q = ((document.getElementById('wo-search')||{}).value||'').toLowerCase();
+        const from = (document.getElementById('wo-from')||{}).value||'';
+        const to   = (document.getElementById('wo-to')||{}).value||'';
+        return (DB.invoices||[]).filter(inv => {
+          if ((inv.writeOff||0) <= 0 && inv.status !== 'Written-Off') return false;
+          if (q && !inv.partyName.toLowerCase().includes(q) && !inv.invoiceNo.toLowerCase().includes(q)) return false;
+          if (from || to) {
+            const d = parseIST(inv.invoiceDate);
+            if (from && d && d < new Date(from)) return false;
+            if (to   && d && d > new Date(to+'T23:59:59')) return false;
+          }
+          return true;
+        }).sort((a,b) => (parseIST(b.invoiceDate)||0) - (parseIST(a.invoiceDate)||0));
+      }
+      function renderWriteOffs() {
+        const list = _getWriteOffList();
+        const total = list.length;
+        const pg = _pState.writeoffs;
+        const page = list.slice((pg-1)*PER, pg*PER);
+        const totalWO = list.reduce((s,i) => s+(i.writeOff||0), 0);
+        const parties = new Set(list.map(i=>i.partyID)).size;
+        const today = new Date(); today.setHours(0,0,0,0);
+        const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+        const thisMonthWO = list.filter(i => { const d = parseIST(i.invoiceDate); return d && d >= monthStart; }).reduce((s,i) => s+(i.writeOff||0), 0);
+        txt('wo-sub', total + ' write-off invoices');
+        const badge = document.getElementById('wo-total-badge');
+        if (badge) badge.textContent = INR(totalWO) + ' written off';
+        const stTotal = document.getElementById('wo-stat-total'); if(stTotal) stTotal.textContent = INR(totalWO);
+        const stCount = document.getElementById('wo-stat-count'); if(stCount) stCount.textContent = total;
+        const stPart  = document.getElementById('wo-stat-parties'); if(stPart) stPart.textContent = parties;
+        const stMon   = document.getElementById('wo-stat-month'); if(stMon) stMon.textContent = INR(thisMonthWO);
+        txt('wo-info', total > 0 ? ((pg-1)*PER+1)+'-'+Math.min(pg*PER,total)+' of '+total : '0 records');
+        _updatePager('wo', pg, total);
+        const tbody = document.getElementById('wo-tbody');
+        if (!tbody) return;
+        tbody.innerHTML = page.length === 0
+          ? emptyRow(9, 'No write-offs found')
+          : page.map(inv => {
+            const wo = inv.writeOff || 0;
+            const paid = inv.paidAmount || 0;
+            const od = daysOD(inv);
+            const remarksMatch = (inv.remarks||'').match(/WRITE-OFF: [\d.]+ - ([^|]+)/);
+            const reason = remarksMatch ? remarksMatch[1].trim() : (inv.status === 'Written-Off' ? 'Written-Off' : '--');
+            return `<tr style="background:#FEF7E0">
+              <td style="font-family:monospace;font-size:11px;font-weight:600">${inv.invoiceNo}</td>
+              <td style="font-size:12px;font-weight:600;cursor:pointer" onclick="openPartyModal('${escQ(inv.partyID)}')">${inv.partyName}</td>
+              <td style="font-size:11px">${inv.invoiceDate}</td>
+              <td style="font-size:11px${od > 0 ? ';color:var(--red)' : ''}">${inv.dueDate}</td>
+              <td class="num">${INR(inv.billValue)}</td>
+              <td class="num" style="color:var(--green)">${INR(paid)}</td>
+              <td class="num" style="font-weight:800;color:#F9AB00;font-size:13px">${INR(wo)}</td>
+              <td style="font-size:10px;color:var(--muted);max-width:150px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis" title="${escQ(reason)}">${reason}</td>
+              <td><button class="act-btn ab-view" onclick="openPartyModal('${escQ(inv.partyID)}')" title="View Party"><i class="fas fa-eye"></i></button></td>
+            </tr>`;
+          }).join('');
+      }
+
+      // ============================================================
+      // RENDER: ESCALATIONS (was missing)
+      // ============================================================
+      function renderEscalations() {
+        const escFrom  = (document.getElementById('esc-from')||{}).value||'';
+        const escTo    = (document.getElementById('esc-to')||{}).value||'';
+        const escSearch= ((document.getElementById('esc-search')||{}).value||'').toLowerCase();
+        const list = (DB.followups || []).filter(f => {
+          if (f.partyID === 'RETAIL' || f.partyCode === 'RETAIL') return false;
+          if (f.escalated !== 'Yes') return false;
+          if (escSearch && !f.partyName.toLowerCase().includes(escSearch)) return false;
+          if (escFrom || escTo) {
+            const fd = parseIST((f.datetime||'').split(' ')[0]);
+            if (escFrom && fd && fd < new Date(escFrom)) return false;
+            if (escTo   && fd && fd > new Date(escTo+'T23:59:59')) return false;
+          }
+          return true;
+        }).sort((a, b) => (b.datetime||'').localeCompare(a.datetime||''));
+
+        const kept = list.filter(f => f.promiseKept === 'Yes').length;
+        const pending = list.filter(f => f.promiseKept === 'Pending' || !f.promiseKept).length;
+
+        txt('esc-badge', list.length + ' escalated');
+        txt('esc-count', list.length);
+        txt('esc-outstanding', INR(list.reduce((s, f) => s + (f.outstandingAmt||0), 0)));
+        txt('esc-kept', kept);
+        txt('esc-pending', pending);
+
+        const tbody = document.getElementById('esc-tbody');
+        if (!tbody) return;
+        if (!list.length) { tbody.innerHTML = emptyRow(9, 'No escalations found'); return; }
+
+        tbody.innerHTML = list.map(f => {
+          const pkColor = f.promiseKept === 'Yes' ? 'var(--green)' : f.promiseKept === 'No' ? 'var(--red)' : 'var(--amber)';
+          return `<tr style="background:#FFF7F7">
+            <td style="font-size:12px;font-weight:600;cursor:pointer" onclick="openPartyModal('${escQ(f.partyID)}')">${f.partyName}</td>
+            <td style="font-size:11px">${(f.datetime||'').split(' ')[0]}</td>
+            <td style="font-size:11px;font-weight:600;color:var(--red)">${f.escalatedTo||'Senior Mgmt'}</td>
+            <td class="num" style="font-weight:700;color:var(--red)">${INR(f.outstandingAmt||0)}</td>
+            <td style="font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escQ(f.notes)}">${f.notes||'-'}</td>
+            <td class="num">${f.promiseAmt > 0 ? INR(f.promiseAmt) : '-'}</td>
+            <td style="font-size:11px">${f.promiseDate||'-'}</td>
+            <td><span style="color:${pkColor};font-size:11px;font-weight:600">${f.promiseKept||'Pending'}</span></td>
+            <td style="white-space:nowrap">
+              <button class="act-btn ab-edit admin-only" onclick="openEditFollowUpModal('${escQ(f.followUpID)}')" title="Edit Follow-up"><i class="fas fa-edit"></i></button>
+              <button class="act-btn ab-fu" onclick="openFUModalForParty('${escQ(f.partyID)}','')" title="Follow up"><i class="fas fa-phone-alt"></i></button>
+            </td>
+          </tr>`;
+        }).join('');
+      }
+
+
+      // ============================================================
+      // EDIT PARTY MODAL (Admin only) - FIX 15
+      // ============================================================
+      // ============================================================
+      // EDIT INVOICE MODAL
+      // ============================================================
+      // ============================================================
+      // EDIT INVOICE DRAWER
+      // ============================================================
+      let _editInvID = '';
+      function openEditInvoiceModal(invoiceID) {
+        if (!window._isAdmin) { Swal.fire('Access Denied','Only Admin can edit invoices.','error'); return; }
+        const inv = (DB.invoices||[]).find(x => x.invoiceID === invoiceID);
+        if (!inv) { Swal.fire('Error','Invoice not found.','error'); return; }
+        _editInvID = invoiceID;
+
+        document.getElementById('edit-inv-title').textContent = 'Edit Invoice: ' + inv.invoiceNo;
+        document.getElementById('edit-inv-sub').textContent   = inv.partyName + '  ·  Due: ' + inv.dueDate;
+
+        document.getElementById('edit-inv-body').innerHTML = `
+          <div class="edit-section-title">Basic Info</div>
+          <div class="edit-badge-row">
+            <span style="color:var(--muted)">Invoice No</span>
+            <span style="font-weight:700;font-family:monospace">${inv.invoiceNo}</span>
+          </div>
+          <div class="edit-badge-row">
+            <span style="color:var(--muted)">Party</span>
+            <span style="font-weight:600">${inv.partyName}</span>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Dates</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Invoice Date</label>
+              <input id="ei-date" value="${inv.invoiceDate}" placeholder="dd/mm/yyyy">
+              <span class="edit-hint">Format: DD/MM/YYYY</span>
+            </div>
+            <div class="edit-field">
+              <label>Due Date <span style="color:var(--red)">*</span></label>
+              <input id="ei-due" value="${inv.dueDate}" placeholder="dd/mm/yyyy">
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Due Days</label>
+            <input id="ei-days" type="number" value="${inv.dueDays||0}">
+            <span class="edit-hint">Credit period in days</span>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Financial Details</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Bill Value (₹) <span style="color:var(--red)">*</span></label>
+              <input id="ei-bill" type="number" value="${inv.billValue}" oninput="updateNetCalc()">
+            </div>
+            <div class="edit-field">
+              <label>Net Amount (₹)</label>
+              <input id="ei-net" type="number" value="${inv.netAmount}" style="color:#1E8E3E;font-weight:600">
+              <span class="edit-hint">Auto-calc or override</span>
+            </div>
+          </div>
+          <div class="edit-grid-3">
+            <div class="edit-field">
+              <label>CGST (₹)</label>
+              <input id="ei-cgst" type="number" value="${inv.cgst||0}" oninput="updateNetCalc()">
+            </div>
+            <div class="edit-field">
+              <label>SGST (₹)</label>
+              <input id="ei-sgst" type="number" value="${inv.sgst||0}" oninput="updateNetCalc()">
+            </div>
+            <div class="edit-field">
+              <label>IGST (₹)</label>
+              <input id="ei-igst" type="number" value="${inv.igst||0}" oninput="updateNetCalc()">
+            </div>
+          </div>
+          <div class="edit-grid-3">
+            <div class="edit-field">
+              <label>TDS (₹)</label>
+              <input id="ei-tcs" type="number" value="${inv.tcs||0}" oninput="updateNetCalc()">
+            </div>
+            <div class="edit-field">
+              <label>Other Dedn (₹)</label>
+              <input id="ei-other" type="number" value="${inv.otherDed||0}" oninput="updateNetCalc()">
+            </div>
+            <div class="edit-field">
+              <label>TCS (₹)</label>
+              <input id="ei-tcs2" type="number" value="0">
+            </div>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Slab & Classification</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Cash Disc Slab</label>
+              <select id="ei-slab">
+                <option value="0" ${inv.slabPct==='0'||!inv.slabPct?'selected':''}>Nil (No Discount)</option>
+                <option value="1" ${inv.slabPct==='1'?'selected':''}>1% Discount</option>
+                <option value="1.5" ${inv.slabPct==='1.5'?'selected':''}>1.5% Discount</option>
+              </select>
+            </div>
+            <div class="edit-field">
+              <label>Status</label>
+              <select id="ei-status">
+                <option ${inv.status==='Pending'?'selected':''}>Pending</option>
+                <option ${inv.status==='PartPaid'?'selected':''}>PartPaid</option>
+                <option ${inv.status==='Paid'?'selected':''}>Paid</option>
+                <option ${inv.status==='Written-Off'?'selected':''}>Written-Off</option>
+                <option ${inv.status==='Cancelled'?'selected':''}>Cancelled</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Other Info</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Vehicle No</label>
+              <input id="ei-vehicle" value="${inv.vehicleNo||''}" placeholder="Optional">
+            </div>
+            <div class="edit-field">
+              <label>Head / Category</label>
+              <input id="ei-head" value="${inv.head||''}" placeholder="Optional">
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Difference (₹) <span style="font-size:10px;color:#94A3B8;font-weight:400">— manually entered, shown in Invoices table</span></label>
+            <input id="ei-diff" type="number" value="${inv.difference||0}" placeholder="0">
+            <span class="edit-hint">Enter the difference amount if any discrepancy exists between expected and actual</span>
+          </div>
+          <div class="edit-field">
+            <label>Remarks</label>
+            <textarea id="ei-remarks">${inv.remarks||''}</textarea>
+          </div>
+        `;
+        document.getElementById('edit-inv-overlay').classList.add('show');
+        document.body.style.overflow = 'hidden';
+      }
+
+      function updateNetCalc() {
+        const bill  = parseFloat(document.getElementById('ei-bill')?.value)  || 0;
+        const cgst  = parseFloat(document.getElementById('ei-cgst')?.value)  || 0;
+        const sgst  = parseFloat(document.getElementById('ei-sgst')?.value)  || 0;
+        const igst  = parseFloat(document.getElementById('ei-igst')?.value)  || 0;
+        const tcs   = parseFloat(document.getElementById('ei-tcs')?.value)   || 0;
+        const other = parseFloat(document.getElementById('ei-other')?.value) || 0;
+        const net   = bill - tcs - other;
+        const netEl = document.getElementById('ei-net');
+        if (netEl) netEl.value = Math.round(net);
+      }
+
+      function saveEditInvoice() {
+        const bill = parseFloat(document.getElementById('ei-bill').value);
+        const due  = document.getElementById('ei-due').value.trim();
+        if (!bill || bill <= 0) { Swal.fire('Validation','Bill Value is required','warning'); return; }
+        if (!due) { Swal.fire('Validation','Due Date is required','warning'); return; }
+        const data = {
+          invoiceID: _editInvID,
+          invoiceDate: document.getElementById('ei-date').value.trim(),
+          dueDate: due,
+          dueDays: parseInt(document.getElementById('ei-days').value)||0,
+          billValue: bill,
+          netAmount: parseFloat(document.getElementById('ei-net').value)||bill,
+          cgst: parseFloat(document.getElementById('ei-cgst').value)||0,
+          sgst: parseFloat(document.getElementById('ei-sgst').value)||0,
+          igst: parseFloat(document.getElementById('ei-igst').value)||0,
+          tcs:  parseFloat(document.getElementById('ei-tcs').value)||0,
+          otherDed: parseFloat(document.getElementById('ei-other').value)||0,
+          slabPct: document.getElementById('ei-slab').value,
+          status:  document.getElementById('ei-status').value,
+          vehicleNo: document.getElementById('ei-vehicle').value.trim(),
+          head: document.getElementById('ei-head').value.trim(),
+          remarks: document.getElementById('ei-remarks').value.trim(),
+          difference: parseFloat(document.getElementById('ei-diff').value) || 0
+        };
+        const btn = document.querySelector('#edit-inv-overlay .edit-drawer-footer .btn-primary');
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...'; }
+        google.script.run
+          .withSuccessHandler(r => {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+            if (r.success) {
+              closeEditDrawer('inv');
+              Swal.fire({ icon:'success', title:'Saved!', text:r.msg, timer:1800, showConfirmButton:false });
+              _silentDataRefresh();
+            } else Swal.fire('Error', r.error, 'error');
+          })
+          .withFailureHandler(e => {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+            Swal.fire('Error', e.message, 'error');
+          })
+          .updateInvoice(data, URL_NAME);
+      }
+
+      // ============================================================
+      // EDIT FOLLOW-UP DRAWER
+
+      // ============================================================
+      function openEditFollowUpModal(followUpID) {
+        if (!window._isAdmin) { Swal.fire('Access Denied','Only Admin can edit follow-ups.','error'); return; }
+        const f = (DB.followups||[]).find(x => x.followUpID === followUpID);
+        if (!f) { Swal.fire('Error','Follow-up not found.','error'); return; }
+        window._editFuID = followUpID;
+
+        document.getElementById('edit-fu-title').textContent = 'Edit Follow-up: ' + f.followUpID;
+        document.getElementById('edit-fu-sub').textContent   = f.partyName + '  ·  ' + f.datetime;
+
+        document.getElementById('edit-fu-body').innerHTML = `
+          <div class="edit-section-title">Follow-up Info</div>
+          <div class="edit-badge-row">
+            <span style="color:var(--muted)">Follow-up ID</span>
+            <span style="font-weight:700;font-family:monospace">${f.followUpID}</span>
+          </div>
+          <div class="edit-badge-row">
+            <span style="color:var(--muted)">Party</span>
+            <span style="font-weight:600">${f.partyName}</span>
+          </div>
+          <div class="edit-badge-row">
+            <span style="color:var(--muted)">Invoice</span>
+            <span style="font-weight:600">${f.invoiceNo||'--'}</span>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Communication</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Mode</label>
+              <select id="efu-mode">
+                <option ${f.mode==='Phone Call'?'selected':''}>Phone Call</option>
+                <option ${f.mode==='WhatsApp'?'selected':''}>WhatsApp</option>
+                <option ${f.mode==='Email'?'selected':''}>Email</option>
+                <option ${f.mode==='Visit'?'selected':''}>Visit</option>
+                <option ${f.mode==='Meeting'?'selected':''}>Meeting</option>
+                <option ${f.mode==='Other'?'selected':''}>Other</option>
+              </select>
+            </div>
+            <div class="edit-field">
+              <label>Contact Person</label>
+              <input id="efu-contact" value="${f.contactPerson||''}" placeholder="Name">
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Notes / Conversation</label>
+            <textarea id="efu-notes" style="min-height:90px">${f.notes||''}</textarea>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Promise Details</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Promise Amount (₹)</label>
+              <input id="efu-pamt" type="number" value="${f.promiseAmt||0}">
+            </div>
+            <div class="edit-field">
+              <label>Promise Date</label>
+              <input id="efu-pdate" value="${f.promiseDate||''}" placeholder="dd/mm/yyyy">
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Promise Kept</label>
+            <select id="efu-kept">
+              <option ${f.promiseKept==='Pending'?'selected':''}>Pending</option>
+              <option ${f.promiseKept==='Yes'?'selected':''}>Yes</option>
+              <option ${f.promiseKept==='No'?'selected':''}>No</option>
+              <option ${f.promiseKept==='Partial'?'selected':''}>Partial</option>
+            </select>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Action & Escalation</div>
+          <div class="edit-field">
+            <label>Next Action</label>
+            <input id="efu-action" value="${f.nextAction||''}" placeholder="e.g. Call again, Send reminder">
+          </div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Next Action Date</label>
+              <input id="efu-next" value="${f.nextActionDate||''}" placeholder="dd/mm/yyyy">
+            </div>
+            <div class="edit-field">
+              <label>Priority</label>
+              <select id="efu-pri">
+                <option ${f.priority==='Low'?'selected':''}>Low</option>
+                <option ${f.priority==='Medium'?'selected':''}>Medium</option>
+                <option ${f.priority==='High'?'selected':''}>High</option>
+                <option ${f.priority==='Critical'?'selected':''}>Critical</option>
+              </select>
+            </div>
+          </div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Escalated</label>
+              <select id="efu-esc">
+                <option ${f.escalated==='No'?'selected':''}>No</option>
+                <option ${f.escalated==='Yes'?'selected':''}>Yes</option>
+              </select>
+            </div>
+            <div class="edit-field">
+              <label>Escalated To</label>
+              <input id="efu-escto" value="${f.escalatedTo||''}" placeholder="Name / Dept">
+            </div>
+          </div>
+        `;
+        document.getElementById('edit-fu-overlay').classList.add('show');
+        document.body.style.overflow = 'hidden';
+      }
+
+      function saveEditFollowUp() {
+        const data = {
+          followUpID: window._editFuID,
+          mode: document.getElementById('efu-mode').value,
+          contactPerson: document.getElementById('efu-contact').value.trim(),
+          notes: document.getElementById('efu-notes').value.trim(),
+          promiseAmt: parseFloat(document.getElementById('efu-pamt').value)||0,
+          promiseDate: document.getElementById('efu-pdate').value.trim(),
+          promiseKept: document.getElementById('efu-kept').value,
+          nextAction: document.getElementById('efu-action').value.trim(),
+          nextActionDate: document.getElementById('efu-next').value.trim(),
+          priority: document.getElementById('efu-pri').value,
+          escalated: document.getElementById('efu-esc').value,
+          escalatedTo: document.getElementById('efu-escto').value.trim()
+        };
+        const btn = document.querySelector('#edit-fu-overlay .btn-primary');
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...'; }
+        google.script.run
+          .withSuccessHandler(r => {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+            if (r.success) {
+              closeEditDrawer('fu');
+              Swal.fire({ icon:'success', title:'Saved!', text:r.msg, timer:1800, showConfirmButton:false });
+              _silentDataRefresh();
+            } else Swal.fire('Error', r.error, 'error');
+          })
+          .withFailureHandler(e => {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+            Swal.fire('Error', e.message, 'error');
+          })
+          .updateFollowUp(data, URL_NAME);
+      }
+
+      function openEditPartyModal(partyID) {
+        if (!window._isAdmin) { Swal.fire('Access Denied','Only Admin can edit parties.','error'); return; }
+        const p = (DB.parties||[]).find(x => x.partyID === partyID);
+        if (!p) { Swal.fire('Error','Party not found.','error'); return; }
+        window._editPartyID = partyID;
+
+        document.getElementById('edit-party-title').textContent = 'Edit Party: ' + p.name;
+        document.getElementById('edit-party-sub').textContent   = p.partyCode + '  ·  ' + (p.city||'') + (p.state ? ', '+p.state : '');
+
+        document.getElementById('edit-party-body').innerHTML = `
+          <div class="edit-section-title">Basic Details</div>
+          <div class="edit-field">
+            <label>Party Name <span style="color:var(--red)">*</span></label>
+            <input id="ep-name" value="${p.name}">
+          </div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Party Code</label>
+              <input id="ep-code" value="${p.partyCode||''}">
+            </div>
+            <div class="edit-field">
+              <label>Category</label>
+              <select id="ep-cat">
+                <option ${p.category==='A'?'selected':''}>A</option>
+                <option ${p.category==='B'||!p.category?'selected':''}>B</option>
+                <option ${p.category==='C'?'selected':''}>C</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Location</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>City</label>
+              <input id="ep-city" value="${p.city||''}">
+            </div>
+            <div class="edit-field">
+              <label>State</label>
+              <input id="ep-state" value="${p.state||''}">
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Address</label>
+            <textarea id="ep-addr" style="min-height:60px">${p.address||''}</textarea>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Contact</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Phone 1</label>
+              <input id="ep-phone" value="${p.phone||''}" placeholder="Mobile">
+            </div>
+            <div class="edit-field">
+              <label>Phone 2</label>
+              <input id="ep-phone2" value="${p.phone2||''}" placeholder="Alternate">
+            </div>
+          </div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Email</label>
+              <input id="ep-email" type="email" value="${p.email||''}" placeholder="email@domain.com">
+            </div>
+            <div class="edit-field">
+              <label>Contact Person</label>
+              <input id="ep-contact" value="${p.contact||''}" placeholder="Name">
+            </div>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Legal & Financial</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>GSTIN</label>
+              <input id="ep-gstin" value="${p.gstin||''}" placeholder="15-digit GST">
+            </div>
+            <div class="edit-field">
+              <label>PAN</label>
+              <input id="ep-pan" value="${p.pan||''}" placeholder="10-digit PAN">
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Credit Limit (₹)</label>
+            <input id="ep-credit" type="number" value="${p.creditLimit||0}">
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Payment Terms & Slab</div>
+          <div class="edit-grid-3">
+            <div class="edit-field">
+              <label>1.5% Slab (days)</label>
+              <input id="ep-d15" type="number" value="${p.days15!=null?p.days15:''}" placeholder="leave blank">
+              <span class="edit-hint">Blank = not applicable</span>
+            </div>
+            <div class="edit-field">
+              <label>1% Slab (days)</label>
+              <input id="ep-d1" type="number" value="${p.days1!=null?p.days1:''}" placeholder="leave blank">
+            </div>
+            <div class="edit-field">
+              <label>Nil Slab (days)</label>
+              <input id="ep-d0" type="number" value="${p.days0!=null?p.days0:''}" placeholder="e.g. 30">
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Payment Terms</label>
+            <input id="ep-terms" value="${p.payTerms||''}" placeholder="e.g. Net 30">
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Other</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Head</label>
+              <input id="ep-head" value="${p.head||''}" placeholder="e.g. Iron Store">
+            </div>
+            <div class="edit-field">
+              <label>Status</label>
+              <select id="ep-status">
+                <option ${p.status==='Active'?'selected':''}>Active</option>
+                <option ${p.status==='Inactive'?'selected':''}>Inactive</option>
+                <option ${p.status==='Blacklisted'?'selected':''}>Blacklisted</option>
+              </select>
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Notes</label>
+            <textarea id="ep-notes" style="min-height:60px">${p.notes||''}</textarea>
+          </div>
+        `;
+        document.getElementById('edit-party-overlay').classList.add('show');
+        document.body.style.overflow = 'hidden';
+      }
+
+      // ============================================================
+      // RECALC PARTY INVOICES — Auto-created party fix
+      // ============================================================
+
+      function _showRecalcOffer(partyID, preview) {
+        const rows = preview.invoices.map(inv =>
+          `<tr style="font-size:11px">
+            <td style="font-family:monospace;padding:4px 8px">${inv.invoiceNo}</td>
+            <td style="padding:4px 8px;color:var(--muted)">${inv.invoiceDate}</td>
+            <td style="padding:4px 8px;color:var(--red)">${inv.oldDueDate}</td>
+            <td style="padding:4px 8px;color:#1E8E3E;font-weight:600">${inv.newDueDate}</td>
+            <td style="padding:4px 8px;color:var(--muted)">${inv.oldSlab === '0' ? 'Nil' : inv.oldSlab + '%'}</td>
+            <td style="padding:4px 8px;color:#1E8E3E;font-weight:600">${inv.newSlab === '0' ? 'Nil' : inv.newSlab + '%'}</td>
+          </tr>`
+        ).join('');
+
+        Swal.fire({
+          title: '⚠️ Fix Invoice Calculations?',
+          html: `
+            <div style="text-align:left;font-size:13px;margin-bottom:12px">
+              <b>${preview.count} pending invoice(s)</b> for <b>${preview.partyName}</b> were created when
+              this party had default values. Now that correct terms are saved, you can update their
+              due dates and slab — <span style="color:var(--red)">only Pending invoices with zero payment are eligible.</span>
+            </div>
+            <div style="max-height:220px;overflow-y:auto;border:1px solid #E2E8F0;border-radius:8px">
+              <table style="width:100%;border-collapse:collapse">
+                <thead style="background:#F8FAFC;position:sticky;top:0">
+                  <tr style="font-size:10px;color:#64748B">
+                    <th style="padding:6px 8px;text-align:left">Invoice</th>
+                    <th style="padding:6px 8px;text-align:left">Bill Date</th>
+                    <th style="padding:6px 8px;text-align:left">Old Due</th>
+                    <th style="padding:6px 8px;text-align:left">New Due</th>
+                    <th style="padding:6px 8px;text-align:left">Old Slab</th>
+                    <th style="padding:6px 8px;text-align:left">New Slab</th>
+                  </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+              </table>
+            </div>
+            <div style="margin-top:12px;font-size:11px;color:#94A3B8;text-align:left">
+              <i class="fas fa-info-circle"></i>
+              Already-paid, PartPaid, and older invoices will NOT be touched.
+              A note will be added to each updated invoice's remarks.
+            </div>
+          `,
+          icon: 'question',
+          showCancelButton: true,
+          confirmButtonText: '<i class="fas fa-sync-alt"></i> Yes, Update ' + preview.count + ' Invoice(s)',
+          cancelButtonText: 'No, Keep As-Is',
+          confirmButtonColor: '#1E8E3E',
+          cancelButtonColor: '#64748B',
+          width: 700
+        }).then(result => {
+          if (result.isConfirmed) {
+            Swal.fire({ title: 'Updating...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+            google.script.run
+              .withSuccessHandler(r => {
+                if (r.success) {
+                  Swal.fire({ icon:'success', title:'Done!', text:r.msg, timer:2500, showConfirmButton:false });
+                  _silentDataRefresh();
+                } else Swal.fire('Error', r.error, 'error');
+              })
+              .withFailureHandler(e => Swal.fire('Error', e.message, 'error'))
+              .recalcPartyInvoices(partyID, URL_NAME);
+          } else {
+            Swal.fire({ icon:'success', title:'Party Updated!', text:'Invoice dates kept as-is.', timer:2000, showConfirmButton:false });
+          }
+        });
+      }
+
+      function saveEditParty() {
+        const name = document.getElementById('ep-name').value.trim();
+        if (!name) { Swal.fire('Validation','Party name is required','warning'); return; }
+        const data = {
+          partyID: window._editPartyID,
+          partyName: name,
+          partyCode: document.getElementById('ep-code').value.trim(),
+          category:  document.getElementById('ep-cat').value,
+          city:      document.getElementById('ep-city').value.trim(),
+          state:     document.getElementById('ep-state').value.trim(),
+          address:   document.getElementById('ep-addr').value.trim(),
+          phone:     document.getElementById('ep-phone').value.trim(),
+          phone2:    document.getElementById('ep-phone2').value.trim(),
+          email:     document.getElementById('ep-email').value.trim(),
+          contact:   document.getElementById('ep-contact').value.trim(),
+          gstin:     document.getElementById('ep-gstin').value.trim(),
+          pan:       document.getElementById('ep-pan').value.trim(),
+          creditLimit: document.getElementById('ep-credit').value,
+          days15:    document.getElementById('ep-d15').value || null,
+          days1:     document.getElementById('ep-d1').value  || null,
+          days0:     document.getElementById('ep-d0').value  || null,
+          payTerms:  document.getElementById('ep-terms').value.trim(),
+          head:      document.getElementById('ep-head').value.trim(),
+          status:    document.getElementById('ep-status').value,
+          notes:     document.getElementById('ep-notes').value.trim()
+        };
+        const btn = document.querySelector('#edit-party-overlay .btn-primary');
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...'; }
+        google.script.run
+          .withSuccessHandler(r => {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+            if (r.success) {
+              closeEditDrawer('party');
+              _silentDataRefresh();
+              // Check if this was an auto-created party — offer to recalc invoices
+              const savedPartyID = data.partyID;
+              const savedData    = data;
+              google.script.run
+                .withSuccessHandler(prev => {
+                  if (prev.success && prev.count > 0) {
+                    // Show recalc offer
+                    _showRecalcOffer(savedPartyID, prev);
+                  } else {
+                    Swal.fire({ icon:'success', title:'Party Updated!', text:r.msg, timer:2000, showConfirmButton:false });
+                  }
+                })
+                .withFailureHandler(() => {
+                  Swal.fire({ icon:'success', title:'Party Updated!', text:r.msg, timer:2000, showConfirmButton:false });
+                })
+                .previewRecalcPartyInvoices(savedPartyID);
+            } else Swal.fire('Error', r.error, 'error');
+          })
+          .withFailureHandler(e => {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+            Swal.fire('Error', e.message, 'error');
+          })
+          .updateParty(data, URL_NAME);
+      }
+
+      // ============================================================
+      // EDIT PAYMENT DRAWER
+      // ============================================================
+      let _editPayID = null;
+
+      function openEditPaymentModal(paymentID) {
+        if (!window._isAdmin) { Swal.fire('Access Denied', 'Only Admin can edit payments.', 'error'); return; }
+        const p = (DB.payments || []).find(x => x.paymentID === paymentID);
+        if (!p) { Swal.fire('Error', 'Payment not found.', 'error'); return; }
+        _editPayID = paymentID;
+        document.getElementById('edit-pay-title').textContent = 'Edit Payment: ' + p.paymentID;
+        document.getElementById('edit-pay-sub').textContent   = p.partyName + '  ·  ' + p.paymentDate;
+
+        const toInput = s => {
+          if (!s) return '';
+          const parts = s.split('/');
+          if (parts.length === 3) return parts[2] + '-' + parts[1].padStart(2,'0') + '-' + parts[0].padStart(2,'0');
+          return s;
+        };
+
+        document.getElementById('edit-pay-body').innerHTML = `
+          <div class="edit-section-title">Payment Info</div>
+          <div class="edit-badge-row">
+            <span style="color:var(--muted)">Payment ID</span>
+            <span style="font-weight:700;font-family:monospace">${p.paymentID}</span>
+          </div>
+          <div class="edit-badge-row">
+            <span style="color:var(--muted)">Party</span>
+            <span style="font-weight:600">${p.partyName}</span>
+          </div>
+          <div class="edit-badge-row">
+            <span style="color:var(--muted)">Applied To</span>
+            <span style="font-size:11px;font-family:monospace">${p.appliedTo || '--'}</span>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Date & Amount</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Payment Date <span style="color:var(--red)">*</span></label>
+              <input id="ep-date" type="date" value="${toInput(p.paymentDate)}">
+            </div>
+            <div class="edit-field">
+              <label>Amount (₹) <span style="color:var(--red)">*</span></label>
+              <input id="ep-amount" type="number" value="${p.amount || 0}">
+            </div>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Payment Details</div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Mode</label>
+              <select id="ep-mode">
+                ${['RTGS','NEFT','IMPS','Cheque','Cash','UPI','DD','Other'].map(m =>
+                  '<option' + (p.mode===m?' selected':'') + '>' + m + '</option>').join('')}
+              </select>
+            </div>
+            <div class="edit-field">
+              <label>Reference / UTR No</label>
+              <input id="ep-ref" value="${p.refNo || ''}" placeholder="UTR / Cheque No">
+            </div>
+          </div>
+          <div class="edit-grid-2">
+            <div class="edit-field">
+              <label>Bank Name</label>
+              <input id="ep-bank" value="${p.bankName || ''}" placeholder="Optional">
+            </div>
+            <div class="edit-field">
+              <label>Cheque Date</label>
+              <input id="ep-cheque-date" type="date" value="${toInput(p.chequeDate || '')}">
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Cheque Status</label>
+            <select id="ep-cheque-status">
+              <option value="" ${!p.chequeStatus ? 'selected' : ''}>-- N/A --</option>
+              ${['Cleared','Pending','Bounced'].map(s =>
+                '<option' + (p.chequeStatus===s?' selected':'') + '>' + s + '</option>').join('')}
+            </select>
+          </div>
+
+          <div class="edit-section-title" style="margin-top:4px">Deductions</div>
+          <div class="edit-grid-3">
+            <div class="edit-field">
+              <label>TDS Deducted (₹)</label>
+              <input id="ep-tds" type="number" value="${p.tdsDeducted || 0}">
+            </div>
+            <div class="edit-field">
+              <label>Discount Given (₹)</label>
+              <input id="ep-disc" type="number" value="${p.discountGiven || 0}">
+            </div>
+            <div class="edit-field">
+              <label>Discount TBG (₹)</label>
+              <input id="ep-dtbg" type="number" value="${p.discountToBeGiven || 0}">
+            </div>
+          </div>
+          <div class="edit-field">
+            <label>Remarks</label>
+            <textarea id="ep-remarks">${p.remarks || ''}</textarea>
+          </div>
+        `;
+        document.getElementById('edit-pay-overlay').classList.add('show');
+        document.body.style.overflow = 'hidden';
+      }
+
+      function saveEditPayment() {
+        const dateVal = document.getElementById('ep-date').value;
+        const amount  = parseFloat(document.getElementById('ep-amount').value);
+        if (!dateVal) { Swal.fire('Validation', 'Payment Date is required', 'warning'); return; }
+        if (!amount || amount < 0) { Swal.fire('Validation', 'Amount must be 0 or more', 'warning'); return; }
+
+        const fmtDateStr = s => {
+          if (!s) return '';
+          const p = s.split('-');
+          return p.length === 3 ? p[2] + '/' + p[1] + '/' + p[0] : s;
+        };
+
+        const data = {
+          paymentID:          _editPayID,
+          paymentDate:        fmtDateStr(dateVal),
+          amount,
+          mode:               document.getElementById('ep-mode').value,
+          refNo:              document.getElementById('ep-ref').value.trim(),
+          bankName:           document.getElementById('ep-bank').value.trim(),
+          chequeDate:         fmtDateStr(document.getElementById('ep-cheque-date').value),
+          chequeStatus:       document.getElementById('ep-cheque-status').value,
+          tdsDeducted:        parseFloat(document.getElementById('ep-tds').value)  || 0,
+          discountGiven:      parseFloat(document.getElementById('ep-disc').value) || 0,
+          discountToBeGiven:  parseFloat(document.getElementById('ep-dtbg').value) || 0,
+          remarks:            document.getElementById('ep-remarks').value.trim()
+        };
+
+        const btn = document.querySelector('#edit-pay-overlay .edit-drawer-footer .btn-primary');
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...'; }
+        google.script.run
+          .withSuccessHandler(r => {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+            if (r.success) {
+              closeEditDrawer('pay');
+              Swal.fire({ icon:'success', title:'Saved!', text:r.msg, timer:1800, showConfirmButton:false });
+              _silentDataRefresh();
+            } else Swal.fire('Error', r.error, 'error');
+          })
+          .withFailureHandler(e => {
+            if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+            Swal.fire('Error', e.message, 'error');
+          })
+          .updatePayment(data, URL_NAME);
+      }
+
+      function closeEditDrawer(type) {
+        const ids = { inv:'edit-inv-overlay', party:'edit-party-overlay', fu:'edit-fu-overlay', pay:'edit-pay-overlay' };
+        const el = document.getElementById(ids[type]);
+        if (el) el.classList.remove('show');
+        document.body.style.overflow = '';
+      }
+
+
+
+
+      function clearODFilter() {
+        const s = document.getElementById('od-search'); if(s) s.value='';
+        const p = document.getElementById('od-party-filter-inp'); if(p) p.value='';
+        renderOverdue();
+      }
+
+      // Searchable party filter helper
+      function _buildPartyDatalist(listId) {
+        let dl = document.getElementById(listId);
+        if (!dl) { dl = document.createElement('datalist'); dl.id = listId; document.body.appendChild(dl); }
+        dl.innerHTML = (DB.parties||[]).filter(p=>p.status==='Active')
+          .map(p=>`<option value="${p.name}" data-id="${p.partyID}">`).join('');
+      }
+      function _getPartyIDFromName(name, fallbackSelId) {
+        // First try datalist match
+        const p = (DB.parties||[]).find(x => x.name.toLowerCase() === (name||'').toLowerCase().trim());
+        if (p) return p.partyID;
+        // fallback: direct select value
+        const sel = document.getElementById(fallbackSelId);
+        return sel ? sel.value : '';
+      }
+      function clearDateFilter(prefix) {
+        const fromEl = document.getElementById(prefix + '-from');
+        const toEl   = document.getElementById(prefix + '-to');
+        const searchEl= document.getElementById(prefix + '-search');
+        if (fromEl)   fromEl.value  = '';
+        if (toEl)     toEl.value    = '';
+        if (searchEl) searchEl.value = '';
+        try { sdReset(prefix + '-party-sd', 'All Parties'); } catch(e) {}
+        const renderMap = {
+          inv: renderInvoices, pay: renderPayments, fu: renderFollowups,
+          sp: renderShortPay, lp: renderLatePay,
+          pt: renderPromises, esc: renderEscalations,
+          dtbg: renderDiscountTBG, wo: renderWriteOffs,
+          s15: ()=>renderSlabDue('15'), s1: ()=>renderSlabDue('1'), sNil: ()=>renderSlabDue('Nil')
+        };
+        if (renderMap[prefix]) renderMap[prefix]();
+      }
+
+      function _silentDataRefresh() {
+        google.script.run
+          .withSuccessHandler(data => {
+            if (!data || !data.success) return;
+            DB = data;
+            _updateBadges();
+            _populateFilters();
+            _buildAllPartySS();
+            _reRenderCurrent();
+            if (typeof _refreshRetailViews === 'function') _refreshRetailViews();
+          })
+          .getAllData((USER && USER.name) || URL_NAME);
+      }
+
+      function doLogout() {
+        Swal.fire({
+          title: 'Sign Out?',
+          text: 'Are you sure you want to sign out of ' + (USER.name || 'your account') + '?',
+          icon: 'question', showCancelButton: true,
+          confirmButtonColor: C.red, cancelButtonColor: '#374151',
+          confirmButtonText: 'Yes, Sign Out', cancelButtonText: 'Cancel',
+          background: '#0F172A', color: '#E2E8F0'
+        }).then(r => {
+          if (!r.isConfirmed) return;
+          Swal.fire({ title: 'Signing out...', allowOutsideClick: false, didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#E2E8F0' });
+          try { localStorage.removeItem('fresko_user'); } catch(e) {}
+          _user = null;
+          window.location.reload();
+        });
+      }
+
+      (function() {
+        if (typeof XLSX === 'undefined') {
+          var script = document.createElement('script');
+          script.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
+          document.head.appendChild(script);
+        }
+      })();
+
+      function toggleDarkMode() {
+        document.body.classList.toggle('dark');
+        const icon = document.getElementById('theme-icon');
+        if (document.body.classList.contains('dark')) {
+          icon.classList.remove('fa-moon');
+          icon.classList.add('fa-sun');
+        } else {
+          icon.classList.remove('fa-sun');
+          icon.classList.add('fa-moon');
+        }
+      }
+
+// ============================================================
+// RETAIL SALE REGISTER — Frontend (integrated from RetailUploader)
+// ============================================================
+
+var _retailStep = 1;
+var _retailData = { parsed: null, result: null, allRows: [], allLog: [] };
+var _retailPage = 1;
+var _ruParsing = false;
+
+
+
+// ---- STEP 1: Upload ----
+function _renderRetailUpload() {
+  var sc = document.getElementById('ru-stepContent');
+  if (!sc) return;
+  _updateRetailSteps();
+  if (_retailStep === 1) _renderRU1(sc);
+  else if (_retailStep === 2) _renderRU2(sc);
+  else _renderRU3(sc);
+}
+
+function _updateRetailSteps() {
+  [1,2,3].forEach(function(n) {
+    var el = document.getElementById('ru-step' + n);
+    if (!el) return;
+    var base = 'flex:1;text-align:center;padding:12px;font-size:12px;font-weight:600;';
+    var border = n > 1 ? 'border-left:1px solid var(--border);' : '';
+    if (_retailStep === n) el.style.cssText = base + border + 'color:var(--primary);background:#E8F0FE';
+    else if (_retailStep > n) el.style.cssText = base + border + 'color:var(--green);background:#E6F4EA';
+    else el.style.cssText = base + border + 'color:var(--muted);background:#fff';
+  });
+}
+
+function _renderRU1(sc) {
+  sc.innerHTML =
+    '<div class="card card-p">' +
+    '<div style="font-weight:700;font-size:14px;margin-bottom:12px"><i class="fas fa-file-pdf" style="color:var(--red);margin-right:8px"></i>Upload Local Sale Register PDF</div>' +
+    '<input type="file" id="ru-fileInput" accept=".pdf" style="display:none">' +
+    '<div id="ru-dropzone" onclick="document.getElementById(\'ru-fileInput\').click()" style="border:2px dashed var(--border);border-radius:12px;padding:42px 24px;text-align:center;cursor:pointer;transition:all .18s;background:#FAFAFA">' +
+      '<div style="width:64px;height:64px;border-radius:16px;margin:0 auto 14px;background:linear-gradient(135deg,#d1eff3,#b8e5eb);display:flex;align-items:center;justify-content:center;font-size:26px;color:#367884">' +
+        '<i class="fas fa-file-arrow-up"></i>' +
+      '</div>' +
+      '<div style="font-size:16px;font-weight:700;margin-bottom:6px">PDF yahan drop karein ya click karein</div>' +
+      '<div style="font-size:12.5px;color:var(--muted);margin-bottom:4px">Sirf <strong>.pdf</strong> Local Sale Register files accept hoti hain</div>' +
+      '<div style="font-size:11px;color:var(--sub)"><i class="fas fa-shield-halved" style="color:var(--green);margin-right:4px"></i>Browser mein process hoti hai — data sheet pe hi jaata hai</div>' +
+    '</div>' +
+    '<div id="ru-status" style="margin-top:16px"></div>' +
+    '</div>' +
+    '<div class="info-box amber" style="margin-top:12px">' +
+      '<i class="fas fa-triangle-exclamation"></i>' +
+      '<div><b>Local Sale Register</b> PDF upload karein — Purchase Register alag app mein jaata hai.&nbsp;' +
+      '<a href="#" onclick="nav(\'retailSales\');return false" style="color:#5A7B00;font-weight:700">Pehle ke uploads dekhein →</a></div>' +
+    '</div>';
+
+  var dz = document.getElementById('ru-dropzone');
+  var fi = document.getElementById('ru-fileInput');
+  dz.ondragover = function(e) { e.preventDefault(); dz.style.borderColor = 'var(--primary)'; dz.style.background = '#E8F0FE'; };
+  dz.ondragleave = function() { dz.style.borderColor = 'var(--border)'; dz.style.background = '#FAFAFA'; };
+  dz.ondrop = function(e) {
+    e.preventDefault();
+    dz.style.borderColor = 'var(--border)'; dz.style.background = '#FAFAFA';
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) _ruHandleFile(e.dataTransfer.files[0]);
+  };
+  fi.onchange = function(e) { if (e.target.files && e.target.files[0]) _ruHandleFile(e.target.files[0]); };
+}
+
+function _ruHandleFile(file) {
+  if (file.type !== 'application/pdf') { Swal.fire('Error', 'PDF file upload karein', 'error'); return; }
+  if (_ruParsing) return;
+  _ruParsing = true;
+  document.getElementById('ru-status').innerHTML =
+    '<div class="card card-p">' +
+    '<div style="display:flex;justify-content:space-between;margin-bottom:10px;font-weight:700;font-size:13px">' +
+      '<span><i class="fas fa-spinner fa-spin" style="color:var(--primary);margin-right:6px"></i>PDF parse ho raha hai...</span>' +
+      '<span id="ru-pct" style="color:var(--primary)">0%</span>' +
+    '</div>' +
+    '<div style="height:8px;background:#F1F5F9;border-radius:99px;overflow:hidden">' +
+      '<div id="ru-progress" style="height:100%;width:0%;background:linear-gradient(90deg,var(--green),var(--primary));transition:width .4s ease;border-radius:99px"></div>' +
+    '</div>' +
+    '<div id="ru-det" style="font-size:11.5px;color:var(--muted);text-align:center;margin-top:8px">PDF engine initializing...</div>' +
+    '</div>';
+
+  var reader = new FileReader();
+  reader.onload = function(e) { _ruSetProgress(15); _ruProcessPDF(e.target.result, file.name); };
+  reader.onerror = function() {
+    _ruParsing = false;
+    document.getElementById('ru-status').innerHTML = '<div class="info-box red"><i class="fas fa-exclamation-circle"></i>File read error. Dobara try karein.</div>';
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function _ruSetProgress(p) {
+  var f = document.getElementById('ru-progress'); if (f) f.style.width = p + '%';
+  var px = document.getElementById('ru-pct'); if (px) px.textContent = p + '%';
+}
+
+// Retail PDF parser — coordinate-based (from RetailUploader)
+var _RU_DATE_RE = /^\d{2}\/\d{2}\/\d{4}$/;
+var _RU_DATE_RANGE_RE = /(\d{2}\/\d{2}\/\d{4})\s+To\s*:-\s*(\d{2}\/\d{2}\/\d{4})/;
+var _RU_NUM_RE = /^\d[\d.]*$/;
+var _RU_SKIP_RE = /^(AGRONICO|C-65|MAIL\s*:|MSME:|LOCAL\s+SALE\s+REGISTER|Date\s*:-|Purchase\s+Date|DATE\s+TOTAL|GRAND\s+TOTAL)/i;
+
+function _ruPf(s) { var v = parseFloat(String(s || '').replace(/[^\d.]/g, '')); return isNaN(v) ? 0 : Math.round(v * 100) / 100; }
+function _ruXCol(x) {
+  if (x < 90) return 'date'; if (x < 300) return 'item'; if (x < 340) return 'qty';
+  if (x < 420) return 'unit'; if (x < 510) return 'rate'; return 'amount';
+}
+function _ruIsCustomer(t) {
+  if (_RU_DATE_RE.test(t.trim())) return false;
+  if (/\d{4,}/.test(t)) return false;
+  var L = t.replace(/[^a-zA-Z]/g, ''), U = t.replace(/[^A-Z]/g, '');
+  return L.length >= 3 && U.length / Math.max(L.length, 1) >= 0.5;
+}
+async function _ruPageItems(page) {
+  var vp = page.getViewport({ scale: 1 });
+  var tc = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: true });
+  var out = [];
+  tc.items.forEach(function(it) {
+    var s = it.str && it.str.trim();
+    if (s) out.push({ x: it.transform[4], y: Math.round(vp.height - it.transform[5]), text: s });
+  });
+  return out;
+}
+function _ruGrpY(items) {
+  var m = {};
+  items.forEach(function(it) {
+    var k = null, ks = Object.keys(m).map(Number);
+    for (var i = 0; i < ks.length; i++) { if (Math.abs(ks[i] - it.y) <= 2) { k = ks[i]; break; } }
+    if (k === null) k = it.y;
+    if (!m[k]) m[k] = []; m[k].push(it);
+  });
+  return m;
+}
+async function _ruParseAll(pdf) {
+  var rows = [], dr = '', cust = '';
+  for (var pg = 1; pg <= pdf.numPages; pg++) {
+    _ruSetProgress(20 + Math.floor((pg / pdf.numPages) * 55));
+    var det = document.getElementById('ru-det'); if (det) det.textContent = 'Page ' + pg + ' / ' + pdf.numPages + ' extract ho rahi hai...';
+    var page = await pdf.getPage(pg);
+    var items = await _ruPageItems(page);
+    var yM = _ruGrpY(items);
+    var yKs = Object.keys(yM).map(Number).sort(function(a, b) { return a - b; });
+    var recs = [];
+    yKs.forEach(function(y) {
+      var ri = yM[y].sort(function(a, b) { return a.x - b.x; });
+      var rec = { y: y, date: '', item: [], qty: '', unit: '', rate: '', amount: '' };
+      ri.forEach(function(it) {
+        var c = _ruXCol(it.x);
+        if (c === 'item') rec.item.push(it.text);
+        else if (c === 'date') rec.date = it.text.trim();
+        else if (rec[c] !== undefined) rec[c] = (rec[c] ? rec[c] + ' ' : '') + it.text;
+      });
+      rec.item = rec.item.join(' ').trim();
+      rec._f = ri.map(function(it) { return it.text; }).join(' ');
+      recs.push(rec);
+    });
+
+    var pD = '', pI = '';
+    recs.forEach(function(r) {
+      var f = r._f;
+      var dm = _RU_DATE_RANGE_RE.exec(f);
+      if (dm) { dr = dm[1] + ' to ' + dm[2]; return; }
+      if (_RU_SKIP_RE.test(f)) return;
+      if (f.indexOf('info@fresko.co.in') !== -1) return;
+      var hA = r.amount && _RU_NUM_RE.test(r.amount.split(' ')[0]);
+      var hR = r.rate && _RU_NUM_RE.test(r.rate.split(' ')[0]);
+      var hD = r.date && _RU_DATE_RE.test(r.date);
+      var hI = r.item.length > 0;
+      if (hA && hR) {
+        var fD = hD ? r.date : pD;
+        var fI = hI ? r.item : pI;
+        var fQ = r.qty || '0';
+        var fU = r.unit || 'KG';
+        if (fD && _RU_DATE_RE.test(fD) && fI) {
+          rows.push({ Sale_Date: fD, Customer_Name: cust, Item_Name: fI,
+            Qty: _ruPf(fQ), Unit: fU.toUpperCase(), Rate: _ruPf(r.rate), Amount: _ruPf(r.amount) });
+          pD = pI = '';
+        }
+      } else if (hD || hI) {
+        if (hD) pD = r.date;
+        if (hI) pI = (pI ? pI + ' ' : '') + r.item;
+        if (!hD && _ruIsCustomer(f)) { cust = f.trim(); pD = pI = ''; }
+      } else if (_ruIsCustomer(f)) { cust = f.trim(); pD = pI = ''; }
+    });
+  }
+  return { rows: rows, dateRange: dr };
+}
+
+async function _ruProcessPDF(buf, fileName) {
+  try {
+    var pdf = await pdfjsLib.getDocument(buf).promise;
+    var res = await _ruParseAll(pdf);
+    _ruSetProgress(80);
+    var det = document.getElementById('ru-det'); if (det) det.textContent = 'Duplicate check ho raha hai...';
+
+    google.script.run
+      .withSuccessHandler(function(r) {
+        _ruParsing = false;
+        _ruSetProgress(100);
+        if (!r.success) {
+          document.getElementById('ru-status').innerHTML = '<div class="info-box red"><i class="fas fa-exclamation-circle"></i>Backend: ' + (r.error || 'Unknown') + '</div>';
+          return;
+        }
+        _retailData.parsed = r;
+        _retailStep = 2;
+        setTimeout(_renderRetailUpload, 300);
+      })
+      .withFailureHandler(function(err) {
+        _ruParsing = false;
+        document.getElementById('ru-status').innerHTML = '<div class="info-box red"><i class="fas fa-exclamation-circle"></i>Backend Error: ' + (err && err.message || 'Unknown') + '</div>';
+      })
+      .checkRetailDuplicates(res.rows, res.dateRange, fileName);
+  } catch (err) {
+    _ruParsing = false;
+    document.getElementById('ru-status').innerHTML = '<div class="info-box red"><i class="fas fa-exclamation-circle"></i>PDF Error: ' + (err && err.message || 'Unknown') + '</div>';
+  }
+}
+
+// ---- STEP 2: Preview ----
+function _ruFmt(n) { return (Math.round(n * 100) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+function _renderRU2(sc) {
+  var d = _retailData.parsed || {}, nr = d.newRows || [], dr = d.dupRows || [], s = d.summary || {};
+  _updateRetailSteps();
+
+  // Summary chips: Date Range · Total Qty · Total Amount · New / Dup counts
+  var dateLabel = (d.dateRange || '').trim() || '—';
+  var chips = '<div class="g5" style="margin-bottom:16px">' +
+    '<div class="stat-card sc-blue"><div class="stat-label">Date Range</div><div class="stat-val" style="font-size:13px;line-height:1.3">' + escHTML(dateLabel) + '</div></div>' +
+    '<div class="stat-card sc-green"><div class="stat-label">Total Qty</div><div class="stat-val">' + _ruFmt(s.totalQty || 0) + '</div></div>' +
+    '<div class="stat-card sc-slate"><div class="stat-label">Total Amount</div><div class="stat-val">₹' + _ruFmt(s.totalAmount || 0) + '</div></div>' +
+    '<div class="stat-card sc-blue"><div class="stat-label">New Entries</div><div class="stat-val">' + (s.newCount || 0) + '</div></div>' +
+    '<div class="stat-card sc-amber"><div class="stat-label">Skipped (Dup)</div><div class="stat-val">' + (s.dupCount || 0) + '</div></div>' +
+    '</div>';
+
+  if (nr.length === 0) {
+    sc.innerHTML = chips +
+      '<div class="card card-p" style="text-align:center;padding:48px">' +
+      '<div style="width:64px;height:64px;border-radius:50%;background:#FEF7E0;border:2px solid #F9AB00;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:26px;color:#F9AB00"><i class="fas fa-check-double"></i></div>' +
+      '<div style="font-size:18px;font-weight:800;margin-bottom:7px">Sab entries pehle se exist karti hain</div>' +
+      '<p style="color:var(--muted);font-size:13px;margin-bottom:22px">Is PDF ka data pehle se Google Sheet mein save hai.</p>' +
+      '<button class="btn btn-secondary" onclick="_ruReset()"><i class="fas fa-rotate-left"></i> Doosri PDF Upload Karein</button>' +
+      '</div>';
+    return;
+  }
+
+  // Preview table — aggregated by customer + date
+  var tb = '';
+  nr.forEach(function(r, i) {
+    var qty = (r.Qty != null ? r.Qty : (r.Qty_Summary || 0));
+    var amt = (r.Amount != null ? r.Amount : (r.Total_Amount || 0));
+    tb += '<tr>' +
+      '<td style="color:var(--sub);font-weight:600;font-size:11px">' + (i + 1) + '</td>' +
+      '<td style="font-size:11px;color:var(--muted)">' + escHTML(r.Sale_Date || '') + '</td>' +
+      '<td style="font-weight:600">' + escHTML(r.Customer_Name || '') + '</td>' +
+      '<td class="num" style="font-size:12px;font-weight:600">' + _ruFmt(qty) + '</td>' +
+      '<td class="num" style="font-weight:700;color:#7C3AED">₹' + _ruFmt(amt) + '</td>' +
+    '</tr>';
+  });
+
+  sc.innerHTML = chips +
+    '<div class="card">' +
+    '<div style="padding:13px 18px;background:#F8FAFC;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;font-weight:700;font-size:13px">' +
+      '<span><i class="fas fa-table-list" style="color:#7C3AED;margin-right:6px"></i>Preview — ' + nr.length + ' customers (date-wise)</span>' +
+      '<span style="font-size:11px;color:var(--muted);font-weight:500">' + dr.length + ' duplicates skip honge</span>' +
+    '</div>' +
+    '<div class="tbl-wrap" style="border:none;border-radius:0;max-height:400px;overflow-y:auto">' +
+      '<table class="tbl"><thead><tr>' +
+      '<th>#</th><th>Date</th><th>Customer</th><th class="num">Total Qty</th><th class="num">Total Amount</th>' +
+      '</tr></thead><tbody>' + tb + '</tbody></table>' +
+    '</div></div>' +
+    '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">' +
+      '<button class="btn btn-secondary" onclick="_ruReset()"><i class="fas fa-arrow-left"></i> Wapas</button>' +
+      '<button class="btn btn-primary" id="ru-commitBtn" onclick="_ruCommit()"><i class="fas fa-cloud-upload-alt"></i> Confirm & Save</button>' +
+    '</div>';
+}
+
+function _ruCommit() {
+  var btn = document.getElementById('ru-commitBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Save ho raha hai...'; }
+  var d = _retailData.parsed || {};
+  var meta = {
+    pdfFilename: d.pdfFilename || 'RETAIL SALE REGISTER',
+    dateRange: d.dateRange || '',
+    totalParsed: (d.summary && d.summary.totalParsed) || 0,
+    dupCount: (d.summary && d.summary.dupCount) || 0,
+    totalQty: (d.summary && d.summary.totalQty) || 0,
+    totalAmount: (d.summary && d.summary.totalAmount) || 0
+  };
+  // Attach dateRange onto each row so sheet stores it
+  var rowsToSave = (d.newRows || []).map(function(r) {
+    var copy = {};
+    for (var k in r) if (Object.prototype.hasOwnProperty.call(r, k)) copy[k] = r[k];
+    if (!copy.dateRange) copy.dateRange = meta.dateRange;
+    return copy;
+  });
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Confirm & Save'; }
+      if (res && res.success) {
+        _retailData.result = res;
+        _retailStep = 3;
+        // Force-clear cached rows so next retail view reloads from sheet
+        _retailData.allRows = [];
+        _renderRetailUpload();
+        // Also refresh retailCustomers list
+        if (typeof _loadAllRetailCustomers === 'function') _loadAllRetailCustomers();
+        Swal.fire({ icon: 'success', title: 'Uploaded!', text: (res.written || 0) + ' entries save ho gayi!', timer: 2200, showConfirmButton: false });
+      } else {
+        Swal.fire('Error', (res && res.error) || 'Save failed', 'error');
+      }
+    })
+    .withFailureHandler(function(e) {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Confirm & Save'; }
+      Swal.fire('Error', (e && e.message) || 'Network error', 'error');
+    })
+    .commitRetailData(rowsToSave, meta);
+}
+
+
+function _renderRU3(sc) {
+  var res = _retailData.result || {};
+  _updateRetailSteps();
+  sc.innerHTML =
+    '<div class="card card-p" style="text-align:center;padding:52px 28px">' +
+    '<div style="width:80px;height:80px;border-radius:50%;margin:0 auto 18px;background:#E6F4EA;border:3px solid var(--green);display:flex;align-items:center;justify-content:center;font-size:32px;color:var(--green)">' +
+      '<i class="fas fa-check"></i>' +
+    '</div>' +
+    '<div style="font-size:22px;font-weight:800;margin-bottom:8px">Import Successful!</div>' +
+    '<div style="display:flex;gap:10px;justify-content:center;margin:14px 0 22px">' +
+      '<div style="padding:9px 20px;border-radius:9px;background:#E6F4EA;color:#137333;font-size:13px;font-weight:700"><i class="fas fa-file-circle-check" style="margin-right:6px"></i>' + (res.written || 0) + ' Entries Saved</div>' +
+      (res.skipped ? '<div style="padding:9px 20px;border-radius:9px;background:#FEF7E0;color:#8a4200;font-size:13px;font-weight:700"><i class="fas fa-ban" style="margin-right:6px"></i>' + res.skipped + ' Duplicates Skipped</div>' : '') +
+    '</div>' +
+    '<p style="color:var(--muted);font-size:13px;margin-bottom:24px">Retail sale entries successfully Google Sheet mein save ho gayi hain.</p>' +
+    '<div style="display:flex;gap:8px;justify-content:center">' +
+      '<button class="btn btn-secondary" onclick="_ruReset()"><i class="fas fa-rotate-right"></i> Aur PDF Upload Karein</button>' +
+      '<button class="btn btn-primary" onclick="nav(\'retailSales\')"><i class="fas fa-receipt"></i> Retail Sales Dekhein</button>' +
+    '</div></div>';
+}
+
+function _ruReset() {
+  _retailStep = 1;
+  _retailData = { parsed: null, result: null, allRows: _retailData.allRows };
+  _renderRetailUpload();
+}
+
+// ---- RETAIL SALES VIEW ----
+renderRetailSales = function() {
+  var tbody = document.getElementById('rs-tbody');
+  if (!tbody) return;
+
+  // Cache-first: instant paint if we already have rows
+  var hasCache = _retailData.allRows && _retailData.allRows.length > 0;
+  if (hasCache) {
+    try {
+      _renderRetailSalesTable();
+      _renderRetailStats();
+    } catch (e) { console.error('retail sales render', e); }
+  } else {
+    tbody.innerHTML = emptyRow(5, 'Loading...');
+  }
+
+  // Background refresh (always)
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (!r || !r.success) {
+        if (!hasCache) tbody.innerHTML = emptyRow(5, 'Failed to load');
+        return;
+      }
+      _retailData.allRows = r.rows || [];
+      try {
+        _renderRetailSalesTable();
+        _renderRetailStats();
+      } catch (e) {
+        console.error('retail sales render', e);
+        tbody.innerHTML = emptyRow(5, 'Render error');
+      }
+    })
+    .withFailureHandler(function(e) {
+      if (!hasCache) tbody.innerHTML = emptyRow(5, 'Error: ' + (e && e.message));
+    })
+    .getRetailData();
+}
+
+
+
+function _renderRetailStats() {
+  var rows = _retailData.allRows || [];
+  txt('rs-total', rows.length);
+  // getRetailData returns `amount` (line-item); support both keys
+  txt('rs-amt', '₹' + _ruFmt(rows.reduce(function(s, r) { return s + (r.amount || r.totalAmount || 0); }, 0)));
+  var uniqueCustomers = {};
+  rows.forEach(function(r) { if ((r.pending || 0) > 0.01) uniqueCustomers[r.customer] = true; });
+  txt('rs-pending-cust', Object.keys(uniqueCustomers).length);
+  txt('rs-pending', '₹' + _ruFmt(rows.reduce(function(s, r) { return s + (r.pending || 0); }, 0)));
+}
+
+
+
+
+function retailPage(d) {
+  var list = _retailData.allRows || [];
+  var totalPages = Math.max(1, Math.ceil(list.length / PER));
+  _retailPage = Math.max(1, Math.min(_retailPage + d, totalPages));
+  _renderRetailSalesTable();
+}
+
+// ============================================================
+// FIFO LOGIC — Payment applied to OLDEST invoices first
+// (Additive: hooks into existing rp-amount/rp-tds inputs)
+// ============================================================
+
+function onFIFOToggle() {
+  var tgl = document.getElementById('rp-fifo-toggle');
+  if (!tgl) return;
+  var isOn = tgl.checked;
+  var hint = document.getElementById('rp-fifo-hint');
+  if (hint) hint.style.display = isOn ? 'block' : 'none';
+
+if (isOn) {
+  // Ensure party's invoices are loaded first
+  var visibleChecks = document.querySelectorAll('.rp-inv-check');
+  if (visibleChecks.length === 0) {
+    Swal.fire('Info', 'Pehle party select karein', 'info');
+    tgl.checked = false;
+    return;
+  }
+  document.querySelectorAll('.rp-inv-check').forEach(function(c) { c.checked = true; });
+  _applyFIFOAllocation();
+} else {
+    // FIFO OFF: sab deselect + breakdown clear
+    document.querySelectorAll('.rp-inv-check').forEach(function(c) { c.checked = false; });
+    _clearFIFOBreakdown();
+    if (typeof updateRPSummary === 'function') updateRPSummary();
+  }
+}
+
+function _applyFIFOAllocation() {
+  var amtEl = document.getElementById('rp-amount');
+  if (!amtEl) return;
+  var amount = parseFloat(amtEl.value) || 0;
+
+  // TDS aur Discount bhi consider karo
+  var tdsEl  = document.getElementById('rp-tds');
+  var discEl = document.getElementById('rp-disc');
+  var tds  = tdsEl  ? (parseFloat(tdsEl.value)  || 0) : 0;
+  var disc = discEl ? (parseFloat(discEl.value) || 0) : 0;
+
+  // Total settlement = cash + TDS + discount
+  var totalAvail = amount + tds + disc;
+
+  // Get DOM-order checks — onRPParty() already sorts invoices oldest-first
+  var checks = Array.from(document.querySelectorAll('.rp-inv-check'));
+  if (!checks.length) { _clearFIFOBreakdown(); return; }
+
+  var remaining = totalAvail;
+  checks.forEach(function(c) {
+    var expected = parseFloat(c.dataset.expected || 0);
+    if (remaining <= 0) { c.checked = false; return; }
+    c.checked = true;
+    remaining -= expected;
+  });
+
+  _showFIFOSummary(totalAvail);
+  if (typeof updateRPSummary === 'function') updateRPSummary();
+}
+
+function _showFIFOSummary(totalAvail) {
+  var summary = document.getElementById('rp-selection-summary');
+
+ // Ensure summary box is visible
+  summary.style.display = 'block';
+
+  if (!summary) return;
+
+  var checks = Array.from(document.querySelectorAll('.rp-inv-check:checked'));
+  var remaining = totalAvail;
+  var lines = [];
+  var idx = 1;
+
+  checks.forEach(function(c) {
+    if (remaining <= 0) return;
+    var expected = parseFloat(c.dataset.expected || 0);
+    var alloc = Math.min(remaining, expected);
+    remaining -= alloc;
+    var status = alloc >= expected ? 'FULL' : 'PARTIAL';
+    var statusColor = alloc >= expected ? 'var(--green)' : '#F9AB00';
+    lines.push(
+      '<div style="display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-bottom:1px dashed #E2E8F0">' +
+        '<span style="color:var(--muted);font-family:monospace">' + (idx++) + '. ' + c.value +
+        ' <span style="color:' + statusColor + ';font-size:9px;font-weight:700">[' + status + ']</span></span>' +
+        '<span style="font-weight:700;color:var(--green)">₹' + Math.round(alloc).toLocaleString('en-IN') + '</span>' +
+      '</div>'
+    );
+  });
+
+  if (remaining > 0.5) {
+    lines.push(
+      '<div style="display:flex;justify-content:space-between;font-size:11px;padding:6px 8px;margin-top:6px;background:#FEF7E0;border-radius:5px">' +
+        '<span style="color:#8a4200;font-weight:700"><i class="fas fa-exclamation-triangle"></i> Unallocated</span>' +
+        '<span style="font-weight:800;color:#8a4200">₹' + Math.round(remaining).toLocaleString('en-IN') + '</span>' +
+      '</div>'
+    );
+  }
+
+  var fifoBox = document.getElementById('rp-fifo-breakdown');
+  if (!fifoBox) {
+    fifoBox = document.createElement('div');
+    fifoBox.id = 'rp-fifo-breakdown';
+    fifoBox.style.cssText = 'margin-top:10px;padding:10px;background:#E8F0FE;border-radius:7px;border:1px solid #BFDBFE;max-height:200px;overflow-y:auto';
+    summary.appendChild(fifoBox);
+  }
+  fifoBox.innerHTML =
+    '<div style="font-size:10.5px;font-weight:700;color:#1967D2;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">' +
+      '<i class="fas fa-layer-group" style="margin-right:4px"></i>FIFO Allocation (oldest → newest)' +
+    '</div>' + lines.join('');
+}
+
+function _clearFIFOBreakdown() {
+  var bd = document.getElementById('rp-fifo-breakdown');
+  if (bd) bd.remove();
+}
+
+// Hook into amount / TDS / Discount inputs — auto-recalc FIFO when values change
+(function _hookFIFOInputs() {
+  setInterval(function() {
+    var modal = document.getElementById('rp-modal');
+    if (!modal || !modal.classList.contains('show')) return;
+
+    ['rp-amount', 'rp-tds', 'rp-disc'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (!el || el._fifoHooked) return;
+      el._fifoHooked = true;
+      el.addEventListener('input', function() {
+        var tgl = document.getElementById('rp-fifo-toggle');
+        if (tgl && tgl.checked) _applyFIFOAllocation();
+      });
+    });
+
+    // Show/hide FIFO box based on whether party has pending invoices
+    var fifoBox = document.getElementById('rp-fifo-box');
+    var checks = document.querySelectorAll('.rp-inv-check');
+    if (fifoBox) {
+      fifoBox.style.display = checks.length > 0 ? 'block' : 'none';
+    }
+  }, 500);
+})();
+
+
+// ============================================================
+// RETAIL DATA ACTIONS — Customer-wise view + actions
+// ============================================================
+
+var _retailExpanded = {}; // For customer-wise expand/collapse
+var _retailGrouped = true; // Default: grouped view
+
+// Override the existing renderRetailSales with grouped version
+// var _origRenderRetailSales = renderRetailSales;
+renderRetailSales = function() {
+  var tbody = document.getElementById('rs-tbody');
+  if (!tbody) return;
+
+  // Cache-first: instant paint if we already have rows
+  var hasCache = _retailData.allRows && _retailData.allRows.length > 0;
+  if (hasCache) {
+    try {
+      _renderRetailSalesTable();
+      _renderRetailStats();
+    } catch (e) { console.error('retail sales render', e); }
+  } else {
+    tbody.innerHTML = emptyRow(5, 'Loading...');
+  }
+
+  // Background refresh (always)
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (!r || !r.success) {
+        if (!hasCache) tbody.innerHTML = emptyRow(5, 'Failed to load');
+        return;
+      }
+      _retailData.allRows = r.rows || [];
+      try {
+        _renderRetailSalesTable();
+        _renderRetailStats();
+      } catch (e) {
+        console.error('retail sales render', e);
+        tbody.innerHTML = emptyRow(5, 'Render error');
+      }
+    })
+    .withFailureHandler(function(e) {
+      if (!hasCache) tbody.innerHTML = emptyRow(5, 'Error: ' + (e && e.message));
+    })
+    .getRetailData();
+}
+
+
+function _renderRetailSalesTable() {
+  var q = ((document.getElementById('rs-search') || {}).value || '').toLowerCase();
+  var from = (document.getElementById('rs-from') || {}).value || '';
+  var to = (document.getElementById('rs-to') || {}).value || '';
+
+  var list = (_retailData.allRows || []).filter(function(r) {
+    if (q && !(r.customer || '').toLowerCase().includes(q)) return false;
+    if (from || to) {
+      var d = parseIST(r.saleDate);
+      if (from && d && d < new Date(from)) return false;
+      if (to && d && d > new Date(to + 'T23:59:59')) return false;
+    }
+    return true;
+  });
+
+  var total = list.length;
+  txt('rs-sub', total + ' entries');
+
+  // Toggle button — inject once
+  var toggleBtn = document.getElementById('rs-view-toggle');
+  if (!toggleBtn) {
+    var hd = document.querySelector('#view-retailSales .page-hd > div:last-child');
+    if (hd) {
+      var btn = document.createElement('button');
+      btn.id = 'rs-view-toggle';
+      btn.className = 'btn btn-secondary';
+      btn.innerHTML = _retailGrouped
+        ? '<i class="fas fa-list"></i> Flat View'
+        : '<i class="fas fa-layer-group"></i> Group by Customer';
+      btn.onclick = function() {
+        _retailGrouped = !_retailGrouped;
+        btn.innerHTML = _retailGrouped
+          ? '<i class="fas fa-list"></i> Flat View'
+          : '<i class="fas fa-layer-group"></i> Group by Customer';
+        _retailExpanded = {};
+        _renderRetailSalesTable();
+      };
+      hd.insertBefore(btn, hd.firstChild);
+    }
+  } else {
+    // Keep toggle button text in sync
+    toggleBtn.innerHTML = _retailGrouped
+      ? '<i class="fas fa-list"></i> Flat View'
+      : '<i class="fas fa-layer-group"></i> Group by Customer';
+  }
+
+  var tbody = document.getElementById('rs-tbody');
+  if (!total) {
+    tbody.innerHTML = emptyRow(5, 'No entries found. Pehle upload karein.');
+    txt('rs-info', '0 entries');
+    return;
+  }
+
+  if (_retailGrouped) {
+    _renderRetailGrouped(tbody, list);
+  } else {
+    _renderRetailFlat(tbody, list);
+  }
+}
+
+
+function _renderRetailGrouped(tbody, list) {
+  // Group by customer
+  var groups = {};
+  list.forEach(function(r) {
+    var c = r.customer || 'Unknown';
+    if (!groups[c]) {
+      groups[c] = {
+        name: c,
+        entries: [],
+        totalAmt: 0,
+        totalPending: 0,
+        totalPaid: 0,
+        lastDate: null,
+        oldestDate: null
+      };
+    }
+    var g = groups[c];
+    g.entries.push(r);
+    g.totalAmt += (r.amount || r.totalAmount || 0);
+    g.totalPending += r.pending || 0;
+    g.totalPaid += r.paid || 0;
+    var d = parseIST(r.saleDate);
+    if (d) {
+      if (!g.lastDate || d > g.lastDate) g.lastDate = d;
+      if (!g.oldestDate || d < g.oldestDate) g.oldestDate = d;
+    }
+  });
+
+  // Sort customers by pending (highest first), then by name
+  var keys = Object.keys(groups).sort(function(a, b) {
+    var pa = groups[a].totalPending, pb = groups[b].totalPending;
+    if (pb !== pa) return pb - pa;
+    return groups[a].name.localeCompare(groups[b].name);
+  });
+
+  var html = '';
+  keys.forEach(function(cname, gIdx) {
+    var g = groups[cname];
+    var isOpen = _retailExpanded[gIdx] === true; // default closed
+
+    // Sort entries within group by date DESC (latest first) for display
+    g.entries.sort(function(a, b) {
+      var da = parseIST(a.saleDate), db = parseIST(b.saleDate);
+      return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+    });
+
+    var lastDateStr = g.lastDate ? _fmtDateShort(g.lastDate) : '--';
+    var pendingColor = g.totalPending > 0.01 ? 'var(--red)' : 'var(--green)';
+    var pendingLabel = g.totalPending > 0.01
+      ? '₹' + _ruFmt(g.totalPending) + ' pending'
+      : 'Fully settled';
+
+    // Customer header row — expand/collapse
+    html += '<tr class="rs-group-row" data-gidx="' + gIdx + '" style="background:#F8FAFC;cursor:pointer;border-top:2px solid #E2E8F0">' +
+      '<td colspan="2" style="font-weight:700;padding:10px 12px">' +
+        '<i class="fas fa-chevron-' + (isOpen?'down':'right') + '" style="font-size:10px;color:var(--muted);margin-right:8px"></i>' +
+        '<i class="fas fa-user" style="color:#7C3AED;margin-right:6px"></i>' +
+        escHTML(g.name) +
+        ' <span style="font-weight:400;color:var(--muted);font-size:11px">(' + g.entries.length + ' entries · Last: ' + lastDateStr + ')</span>' +
+      '</td>' +
+      '<td style="text-align:right;padding:10px 8px">' +
+        '<span style="font-size:11px;font-weight:700;color:' + pendingColor + '">' + pendingLabel + '</span>' +
+      '</td>' +
+      '<td class="num" style="font-weight:800;color:#7C3AED;font-size:13px;padding:10px 12px">₹' + _ruFmt(g.totalAmt) + '</td>' +
+      '<td style="white-space:nowrap;padding:10px 8px" class="rs-group-actions">' +
+        '<button type="button" class="act-btn ab-pay" data-pay="' + escQ(g.name) + '" title="Record Payment"><i class="fas fa-indian-rupee-sign"></i></button>' +
+        '<button type="button" class="act-btn ab-fu" style="margin-left:2px" data-fu="' + escQ(g.name) + '" title="Log Follow-up"><i class="fas fa-phone-alt"></i></button>' +
+        '<button type="button" class="act-btn ab-view" style="margin-left:2px" data-stmt="' + escQ(g.name) + '" title="Statement"><i class="fas fa-file-invoice"></i></button>' +
+      '</td>' +
+    '</tr>';
+
+    // Detail rows (only when expanded)
+    if (isOpen) {
+      g.entries.forEach(function(r) {
+        var pendColor = (r.pending > 0.01) ? 'var(--red)' : 'var(--green)';
+        var qtyVal = (r.qty != null ? r.qty : r.qtySummary);
+        var amtVal = (r.amount != null ? r.amount : r.totalAmount) || 0;
+        html += '<tr style="background:#FAFAFA">' +
+          '<td style="font-size:11px;padding-left:32px;color:var(--muted)">' + escHTML(r.saleDate || '') + '</td>' +
+          '<td style="font-size:11px;color:var(--muted)">' + (qtyVal != null ? _ruFmt(qtyVal) : '--') + '</td>' +
+          '<td class="num" style="font-weight:600;color:var(--text)">₹' + _ruFmt(amtVal) + '</td>' +
+          '<td class="num" style="font-weight:600;color:' + pendColor + '">₹' + _ruFmt(r.pending || 0) + '</td>' +
+          '<td style="font-size:10px;color:var(--muted)">' + escHTML(r.uploadedBy || '--') + '</td>' +
+        '</tr>';
+      });
+    }
+  });
+
+  tbody.innerHTML = html;
+
+  // Event delegation — reliable click for expand + action buttons
+  if (!tbody._rsDelegated) {
+    tbody._rsDelegated = true;
+    tbody.addEventListener('click', function(ev) {
+      var payBtn = ev.target.closest('[data-pay]');
+      if (payBtn) { ev.stopPropagation(); _rptQuickPay(payBtn.getAttribute('data-pay')); return; }
+      var fuBtn = ev.target.closest('[data-fu]');
+      if (fuBtn) { ev.stopPropagation(); openRetailFUModal(fuBtn.getAttribute('data-fu')); return; }
+      var stmtBtn = ev.target.closest('[data-stmt]');
+      if (stmtBtn) { ev.stopPropagation(); _openRetailStatement(stmtBtn.getAttribute('data-stmt')); return; }
+      var row = ev.target.closest('tr.rs-group-row');
+      if (row) {
+        var gi = parseInt(row.getAttribute('data-gidx'), 10);
+        if (!isNaN(gi)) _toggleRetailGroup(gi);
+      }
+    });
+  }
+}
+
+// Helper: short date format from a Date object
+function _fmtDateShort(d) {
+  if (!d) return '--';
+  return String(d.getDate()).padStart(2,'0') + '/' +
+         String(d.getMonth()+1).padStart(2,'0') + '/' +
+         d.getFullYear();
+}
+
+function _renderRetailFlat(tbody, list) {
+  var total = list.length;
+  var page = list.slice((_retailPage - 1) * PER, _retailPage * PER);
+  var totalPages = Math.max(1, Math.ceil(total / PER));
+  var prev = document.getElementById('rs-prev'), next = document.getElementById('rs-next'), pg = document.getElementById('rs-page');
+  if (prev) prev.disabled = _retailPage <= 1;
+  if (next) next.disabled = _retailPage >= totalPages;
+  if (pg) pg.textContent = _retailPage + ' / ' + totalPages;
+  txt('rs-info', ((_retailPage - 1) * PER + 1) + '-' + Math.min(_retailPage * PER, total) + ' of ' + total);
+
+  // Sort by date DESC
+  page.sort(function(a, b) {
+    var da = parseIST(a.saleDate), db = parseIST(b.saleDate);
+    return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+  });
+
+  tbody.innerHTML = page.map(function(r) {
+    var pendColor = (r.pending > 0.01) ? 'var(--red)' : 'var(--green)';
+    var qtyLabel = (r.qty != null ? r.qty : '') + (r.unit ? ' ' + r.unit : '');
+    if (!qtyLabel.trim()) qtyLabel = r.qtySummary || '--';
+    var amt = r.amount != null ? r.amount : (r.totalAmount || 0);
+    return '<tr>' +
+      '<td style="font-size:11px">' + escHTML(r.saleDate || '') + '</td>' +
+      '<td style="font-weight:600">' + escHTML(r.customer || '') + '</td>' +
+      '<td style="font-size:12px">' + escHTML(r.item || qtyLabel) + '</td>' +
+      '<td class="num" style="font-weight:700;color:var(--primary)">₹' + _ruFmt(amt) + '</td>' +
+      '<td class="num" style="font-weight:600;color:' + pendColor + '">₹' + _ruFmt(r.pending || 0) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function _toggleRetailGroup(idx) {
+  _retailExpanded[idx] = !_retailExpanded[idx];
+  _renderRetailSalesTable();
+}
+window._toggleRetailGroup = _toggleRetailGroup;
+
+// ---- Retail Action: WhatsApp ----
+function _retailWhatsApp(customerName) {
+  // Try to find party with matching name for phone
+  var party = (DB.parties || []).find(function(p) {
+    return p.name && p.name.toLowerCase().trim() === customerName.toLowerCase().trim();
+  });
+  if (!party || !party.phone) {
+    Swal.fire({
+      icon: 'info',
+      title: 'No contact found',
+      html: '<b>' + escHTML(customerName) + '</b> ka phone number Parties list me nahi hai.<br><br>Kya aap ek naya party create karna chahte hain?',
+      showCancelButton: true,
+      confirmButtonText: 'Create Party',
+      cancelButtonText: 'Cancel',
+      confirmButtonColor: '#4285F4'
+    }).then(function(r) {
+      if (r.isConfirmed) _retailMakeInvoice(customerName);
+    });
+    return;
+  }
+  var mobile = (party.phone || party.phone2 || '').replace(/\D/g, '');
+  if (mobile.length === 10) mobile = '91' + mobile;
+  window.open('https://wa.me/' + mobile, '_blank');
+}
+
+// ---- Retail Action: View Customer Summary ----
+function _retailCustomerSummary(customerName) {
+  var rows = (_retailData.allRows || []).filter(function(r) { return r.customer === customerName; });
+  if (!rows.length) { Swal.fire('No data', 'Customer entries not found', 'info'); return; }
+
+  // Sort by date DESC
+  rows.sort(function(a, b) {
+    var da = parseIST(a.saleDate), db = parseIST(b.saleDate);
+    return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+  });
+
+  var totalAmt = rows.reduce(function(s, r) { return s + (r.totalAmount || 0); }, 0);
+  var totalPaid = rows.reduce(function(s, r) { return s + (r.paid || 0); }, 0);
+  var totalPending = rows.reduce(function(s, r) { return s + (r.pending || 0); }, 0);
+
+  var rowsHtml = rows.map(function(r) {
+    var pendColor = (r.pending > 0.01) ? '#C5221F' : '#137333';
+    return '<tr style="font-size:11px">' +
+      '<td style="padding:5px 8px">' + escHTML(r.saleDate) + '</td>' +
+      '<td style="padding:5px 8px;color:#64748B">' + escHTML(r.qtySummary || '--') + '</td>' +
+      '<td style="padding:5px 8px;text-align:right">₹' + _ruFmt(r.totalAmount || 0) + '</td>' +
+      '<td style="padding:5px 8px;text-align:right;color:' + pendColor + ';font-weight:600">₹' + _ruFmt(r.pending || 0) + '</td>' +
+    '</tr>';
+  }).join('');
+
+  Swal.fire({
+    title: escHTML(customerName),
+    html:
+      '<div style="display:flex;gap:10px;justify-content:center;margin-bottom:14px">' +
+        '<div style="background:#E8F0FE;border-radius:8px;padding:10px 14px;min-width:90px">' +
+          '<div style="font-size:10px;color:#1967D2;font-weight:700;text-transform:uppercase">Entries</div>' +
+          '<div style="font-size:18px;font-weight:800;color:#1967D2">' + rows.length + '</div>' +
+        '</div>' +
+        '<div style="background:#E6F4EA;border-radius:8px;padding:10px 14px;min-width:90px">' +
+          '<div style="font-size:10px;color:#137333;font-weight:700;text-transform:uppercase">Total Paid</div>' +
+          '<div style="font-size:18px;font-weight:800;color:#137333">₹' + _ruFmt(totalPaid) + '</div>' +
+        '</div>' +
+        '<div style="background:#FCE8E6;border-radius:8px;padding:10px 14px;min-width:90px">' +
+          '<div style="font-size:10px;color:#C5221F;font-weight:700;text-transform:uppercase">Pending</div>' +
+          '<div style="font-size:18px;font-weight:800;color:#C5221F">₹' + _ruFmt(totalPending) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="max-height:280px;overflow-y:auto;border:1px solid #E2E8F0;border-radius:8px">' +
+        '<table style="width:100%;border-collapse:collapse">' +
+          '<thead style="background:#F8FAFC;position:sticky;top:0">' +
+            '<tr style="font-size:10px;color:#64748B;text-transform:uppercase">' +
+              '<th style="padding:6px 8px;text-align:left">Date</th>' +
+              '<th style="padding:6px 8px;text-align:left">Qty Summary</th>' +
+              '<th style="padding:6px 8px;text-align:right">Amount</th>' +
+              '<th style="padding:6px 8px;text-align:right">Pending</th>' +
+            '</tr>' +
+          '</thead>' +
+          '<tbody>' + rowsHtml + '</tbody>' +
+        '</table>' +
+      '</div>',
+    width: 620,
+    showCancelButton: true,
+    showConfirmButton: true,
+    confirmButtonText: '<i class="fas fa-file-invoice"></i> Make Invoice',
+    cancelButtonText: 'Close',
+    confirmButtonColor: '#7C3AED'
+  }).then(function(r) {
+    if (r.isConfirmed) _retailMakeInvoice(customerName);
+  });
+}
+
+// ---- Retail Action: Make Invoice from retail data ----
+function _retailMakeInvoice(customerName) {
+  // Retail customer ko RetailCustomers master se match karo
+  var retailCust = (DB.retailCustomers || []).find(function(c) {
+    return c.name && c.name.toLowerCase().trim() === customerName.toLowerCase().trim();
+  });
+
+  // Supply party bhi check karo (agar dono mein hai toh usse use karo)
+  var supplyParty = (DB.parties || []).find(function(p) {
+    return p.name && p.name.toLowerCase().trim() === customerName.toLowerCase().trim();
+  });
+
+  // Agar supply party nahi hai toh add party view pe bhejo
+  if (!supplyParty) {
+    Swal.fire({
+      icon: 'question',
+      title: 'Supply Party not found',
+      html: '<b>' + escHTML(customerName) + '</b> supply Parties list mein nahi hai.<br><br>' +
+            'Invoice banane ke liye pehle ise supply party ke roop mein add karein.',
+      showCancelButton: true,
+      confirmButtonText: 'Go to Add Party',
+      cancelButtonText: 'Cancel',
+      confirmButtonColor: '#4285F4'
+    }).then(function(r) {
+      if (r.isConfirmed) {
+        nav('addParty');
+        setTimeout(function() {
+          var nameEl = document.getElementById('ap-name');
+          if (nameEl) nameEl.value = customerName;
+          Swal.fire({
+            icon: 'info',
+            title: 'Pre-filled!',
+            text: 'Party name pre-filled hai. Baaki details bharein aur Save karein.',
+            timer: 2500,
+            showConfirmButton: false
+          });
+        }, 350);
+      }
+    });
+    return;
+  }
+
+  // Get pending retail amount for this customer
+  var rows = (_retailData.allRows || []).filter(function(r) { return r.customer === customerName; });
+  var totalPending = rows.reduce(function(s, r) { return s + (r.pending || 0); }, 0);
+  var totalAmt = rows.reduce(function(s, r) { return s + (r.totalAmount || 0); }, 0);
+
+  Swal.fire({
+    icon: 'question',
+    title: 'Create Invoice from Retail?',
+    html: 'Supply Party: <b>' + escHTML(supplyParty.name) + '</b><br>' +
+          'Retail entries: <b>' + rows.length + '</b><br>' +
+          'Total retail amount: <b style="color:#137333">₹' + _ruFmt(totalAmt) + '</b><br>' +
+          'Pending amount: <b style="color:#C5221F">₹' + _ruFmt(totalPending) + '</b><br><br>' +
+          '<div style="font-size:11px;color:#64748B;text-align:left;background:#F8FAFC;padding:10px;border-radius:6px">' +
+            '<b>Note:</b> Ye ek naya invoice create karega us party ke liye. Amount editable hoga. Retail entries waise hi rahenge.' +
+          '</div>',
+    showCancelButton: true,
+    confirmButtonText: '<i class="fas fa-arrow-right"></i> Proceed to New Invoice',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#7C3AED'
+  }).then(function(r) {
+    if (!r.isConfirmed) return;
+    nav('addInvoice');
+    setTimeout(function() {
+      var inp = document.getElementById('ai-ss-inp');
+      if (inp) inp.value = supplyParty.name;
+      if (_ssState['ai-ss']) {
+        _ssState['ai-ss'].value = supplyParty.partyID;
+        _ssState['ai-ss'].text = supplyParty.name;
+      }
+      var idEl = document.getElementById('ai-party-id'); if (idEl) idEl.value = supplyParty.partyID;
+      var codeEl = document.getElementById('ai-party-code'); if (codeEl) codeEl.value = supplyParty.partyCode || '';
+      var nameEl = document.getElementById('ai-party-name'); if (nameEl) nameEl.value = supplyParty.name;
+      var grossEl = document.getElementById('ai-gross');
+      if (grossEl) grossEl.value = Math.round(totalAmt);
+      var headEl = document.getElementById('ai-head');
+      if (headEl) headEl.value = supplyParty.head || '';
+      if (typeof onAIParty === 'function') onAIParty(supplyParty.partyID);
+      if (typeof calcNet === 'function') calcNet();
+      Swal.fire({
+        icon: 'success',
+        title: 'Invoice form pre-filled!',
+        html: 'Retail amount ₹' + _ruFmt(totalAmt) + ' pre-filled hai.<br>Invoice number aur slab check karein.',
+        timer: 3200,
+        showConfirmButton: false
+      });
+    }, 400);
+  });
+}
+
+
+
+// ============================================================
+// RETAIL PAYMENT — TAB SWITCHING + FIFO + STATEMENT
+// ============================================================
+
+var _rpActiveTab = 'invoice';
+var _rptSelectedCustomer = '';
+var _rptEntries = [];
+
+// ---- Tab Switching ----
+function _switchRPTab(tab) {
+  _rpActiveTab = tab;
+  var invBtn = document.getElementById('rp-tab-invoice-btn');
+  var rtBtn  = document.getElementById('rp-tab-retail-btn');
+  var invCont = document.getElementById('rp-tab-invoice-content');
+  var rtCont  = document.getElementById('rp-tab-retail-content');
+
+  var activeStyle = 'flex:1;padding:9px;border-radius:7px;border:none;cursor:pointer;font-size:12.5px;font-weight:700;background:#fff;color:var(--primary);box-shadow:0 1px 4px rgba(0,0,0,.08)';
+  var inactiveStyle = 'flex:1;padding:9px;border-radius:7px;border:none;cursor:pointer;font-size:12.5px;font-weight:600;background:transparent;color:var(--muted)';
+
+  if (tab === 'retail') {
+    invBtn.style.cssText = inactiveStyle;
+    rtBtn.style.cssText  = activeStyle.replace('var(--primary)', '#7C3AED');
+    invCont.style.display = 'none';
+    rtCont.style.display  = 'block';
+    _setDefaultDates();
+    _loadRetailCustomers(_rptSelectedCustomer || '');
+  } else {
+    invBtn.style.cssText = activeStyle;
+    rtBtn.style.cssText  = inactiveStyle;
+    invCont.style.display = 'block';
+    rtCont.style.display  = 'none';
+  }
+}
+
+// ---- Load retail customers with pending ----
+function _buildRetailCustomerOptsFromCache() {
+  var rows = _retailData.allRows || [];
+  var map = {};
+  rows.forEach(function(r) {
+    var name = (r.customer || '').trim();
+    if (!name) return;
+    var pending = parseFloat(r.pending) || 0;
+    if (pending <= 0.01) return;
+    if (!map[name]) map[name] = { name: name, pending: 0, entries: 0, oldestDate: null };
+    map[name].pending += pending;
+    map[name].entries++;
+    var d = parseIST(r.saleDate);
+    if (d && (!map[name].oldestDate || d < map[name].oldestDate)) map[name].oldestDate = d;
+  });
+  return Object.keys(map).map(function(k) {
+    var c = map[k];
+    c.oldestDateStr = c.oldestDate ? _fmtDateShort(c.oldestDate) : '--';
+    return c;
+  }).sort(function(a, b) { return b.pending - a.pending; });
+}
+
+function _paintRetailCustomerSS(customers, prefer) {
+  var el = document.getElementById('rpt-retail-cust-ss');
+  if (!el) return;
+  if (!customers || !customers.length) {
+    el.innerHTML = '<div style="padding:14px;text-align:center;font-size:12px;color:var(--muted)">' +
+      '<i class="fas fa-check-circle" style="color:var(--green);font-size:22px;display:block;margin-bottom:6px"></i>' +
+      'Koi retail outstanding nahi hai.' +
+      '</div>';
+    var badge0 = document.getElementById('rpt-prefill-badge');
+    if (badge0) badge0.remove();
+    return;
+  }
+  var opts = customers.map(function(c) {
+    return {
+      id: c.name, name: c.name,
+      meta: '₹' + _ruFmt(c.pending) + ' · ' + c.entries + ' entries · oldest: ' + (c.oldestDateStr || '--')
+    };
+  });
+  buildSS('rpt-retail-cust-ss', opts, function(custName) {
+    _rptSelectedCustomer = custName;
+    var match = customers.find(function(c) { return c.name === custName; });
+    _showRetailPrefillBadge(match || { name: custName, pending: 0, entries: 0 });
+    // Reset amount for NEW customer — avoid stale unallocated from previous
+    var amtEl = document.getElementById('rpt-amount');
+    if (amtEl) { amtEl.value = match ? (Math.round(match.pending * 100) / 100) : ''; delete amtEl.dataset.userEdited; }
+    _rptEntries = [];
+    _loadRetailEntriesLocalOrRemote(custName);
+  }, 'Search customer...');
+
+  if (prefer) {
+    var match = customers.find(function(c) {
+      return (c.name || '').toLowerCase().trim() === prefer.toLowerCase().trim();
+    });
+    if (match) {
+      _rptSelectedCustomer = match.name;
+      if (_ssState['rpt-retail-cust-ss']) {
+        _ssState['rpt-retail-cust-ss'].value = match.name;
+        _ssState['rpt-retail-cust-ss'].text = match.name;
+      }
+      var inp = document.getElementById('rpt-retail-cust-ss-inp');
+      if (inp) inp.value = match.name;
+      _showRetailPrefillBadge(match);
+      _loadRetailEntries(match.name);
+      // Prefill amount with full pending (user can edit)
+      var amtEl = document.getElementById('rpt-amount');
+      if (amtEl && !amtEl.value) amtEl.value = Math.round(match.pending * 100) / 100;
+    }
+  }
+}
+
+function _showRetailPrefillBadge(c) {
+  if (!c || !c.name) return;
+  var el = document.getElementById('rpt-retail-cust-ss');
+  if (!el || !el.parentNode) return;
+  var badge = document.getElementById('rpt-prefill-badge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'rpt-prefill-badge';
+    el.parentNode.insertBefore(badge, el.nextSibling);
+  }
+  badge.style.cssText = 'margin-top:10px;padding:12px 14px;background:linear-gradient(135deg,#F5F3FF,#EEF2FF);border:1px solid #DDD6FE;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px';
+  badge.innerHTML =
+    '<div style="min-width:0">' +
+      '<div style="font-size:11px;font-weight:700;color:#7C3AED;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Selected Customer</div>' +
+      '<div style="font-weight:700;font-size:14px;color:#1E293B;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHTML(c.name) + '</div>' +
+      '<div style="font-size:11px;color:#64748B;margin-top:2px">' + (c.entries || 0) + ' pending entries' +
+        (c.oldestDateStr ? ' · oldest ' + escHTML(c.oldestDateStr) : '') + '</div>' +
+    '</div>' +
+    '<div style="text-align:right;flex-shrink:0">' +
+      '<div style="font-size:10px;font-weight:600;color:#94A3B8;text-transform:uppercase">Pending</div>' +
+      '<div style="font-weight:800;font-size:18px;color:#EA4335">₹' + _ruFmt(c.pending || 0) + '</div>' +
+    '</div>';
+}
+
+function _loadRetailCustomers(preselectName) {
+  var el = document.getElementById('rpt-retail-cust-ss');
+  if (!el) return;
+  var prefer = preselectName || _rptSelectedCustomer || '';
+
+  // 1) Instant from local cache
+  var cached = _buildRetailCustomerOptsFromCache();
+  if (cached.length) {
+    _paintRetailCustomerSS(cached, prefer);
+  } else {
+    el.innerHTML = '<div style="padding:10px;font-size:12px;color:var(--muted)"><i class="fas fa-spinner fa-spin" style="margin-right:6px"></i>Loading customers...</div>';
+  }
+
+  // 2) Background refresh from server
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (!r || !r.success) {
+        if (!cached.length) {
+          el.innerHTML = '<div style="padding:10px;color:var(--red);font-size:12px">Failed to load customers</div>';
+        }
+        return;
+      }
+      var customers = r.customers || [];
+      _paintRetailCustomerSS(customers, prefer);
+    })
+    .withFailureHandler(function(e) {
+      if (!cached.length) {
+        el.innerHTML = '<div style="padding:10px;color:var(--red);font-size:12px">Error: ' + ((e && e.message) || 'Network') + '</div>';
+      }
+    })
+    .getRetailCustomersWithPending();
+}
+
+
+function _loadRetailEntries(customerName) {
+  _loadRetailEntriesLocalOrRemote(customerName);
+}
+
+
+function _renderRetailEntriesList() {
+  var list = document.getElementById('rpt-retail-entries-list');
+  if (!list) return;
+  list.innerHTML = _rptEntries.map(function(e, idx) {
+    var d = parseIST(e.saleDate);
+    var daysOld = d ? Math.floor((new Date() - d) / 86400000) : 0;
+    var ageColor = daysOld > 60 ? '#EA4335' : daysOld > 30 ? '#F9AB00' : '#94A3B8';
+    var title = (e.item && e.item.trim()) ? e.item : ('Sale · ' + (e.saleDate || ''));
+    var sub = escHTML(e.saleDate || '');
+    if (e.qty) sub += ' · Qty ' + _ruFmt(e.qty);
+    if (e.unit) sub += ' ' + escHTML(e.unit);
+    sub += ' <span style="color:' + ageColor + ';font-weight:600;margin-left:6px">' + daysOld + 'd old</span>';
+    if (e.paid > 0) sub += ' <span style="color:var(--green);margin-left:6px">Paid: ₹' + _ruFmt(e.paid) + '</span>';
+    return '<div style="background:#F8FAFC;border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;gap:10px;align-items:center">' +
+      '<span style="font-size:10px;font-weight:700;color:var(--muted);min-width:22px">#' + (idx + 1) + '</span>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">' +
+          '<span style="font-weight:600;font-size:12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + escHTML(title) + '</span>' +
+          '<span style="font-size:12px;font-weight:700;color:#7C3AED;flex-shrink:0">₹' + _ruFmt(e.pending) + '</span>' +
+        '</div>' +
+        '<div style="font-size:10px;color:var(--muted);margin-top:3px">' + sub + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+
+function _rptUpdateFIFO() {
+  var amtEl = document.getElementById('rpt-amount');
+  var amount = amtEl ? (parseFloat(amtEl.value) || 0) : 0;
+  var totalPending = (_rptEntries || []).reduce(function(s, e) { return s + (parseFloat(e.pending) || 0); }, 0);
+  var allocated = Math.min(amount, totalPending);
+  var afterPay = Math.max(0, totalPending - allocated);
+  var unalloc = Math.max(0, amount - totalPending);
+
+  // Summary cards
+  var elPend = document.getElementById('rpt-total-pending');
+  var elPay = document.getElementById('rpt-paying-now');
+  var elAfter = document.getElementById('rpt-after-pay');
+  if (elPend) elPend.textContent = '₹' + _ruFmt(totalPending);
+  if (elPay) elPay.textContent = '₹' + _ruFmt(allocated);
+  if (elAfter) elAfter.textContent = '₹' + _ruFmt(afterPay);
+
+  var unRow = document.getElementById('rpt-unalloc-row');
+  var unAmt = document.getElementById('rpt-unalloc-amt');
+  if (unRow) {
+    if (unalloc > 0.5) {
+      unRow.style.display = 'block';
+      if (unAmt) unAmt.textContent = '₹' + _ruFmt(unalloc);
+    } else {
+      unRow.style.display = 'none';
+    }
+  }
+
+  var hint = document.getElementById('rpt-amount-hint');
+  if (hint) {
+    if (amount <= 0) {
+      hint.textContent = totalPending > 0 ? ('Full pending: ₹' + _ruFmt(totalPending)) : '';
+      hint.style.color = 'var(--muted)';
+    } else if (unalloc > 0.5) {
+      hint.textContent = '₹' + _ruFmt(unalloc) + ' extra — koi entry nahi bachegi iske liye';
+      hint.style.color = '#8a4200';
+    } else if (afterPay > 0.5) {
+      hint.textContent = 'Baad mein baki rahega: ₹' + _ruFmt(afterPay);
+      hint.style.color = '#64748B';
+    } else {
+      hint.textContent = 'Poora pending clear ho jayega';
+      hint.style.color = '#137333';
+    }
+  }
+
+  var box = document.getElementById('rpt-retail-fifo-breakdown');
+  if (!box) return;
+  if (!_rptEntries.length || amount <= 0) { box.style.display = 'none'; return; }
+
+  var remaining = amount;
+  var lines = [];
+  var idx = 1;
+  _rptEntries.forEach(function(e) {
+    if (remaining <= 0) return;
+    var pend = parseFloat(e.pending) || 0;
+    var alloc = Math.min(remaining, pend);
+    remaining -= alloc;
+    var status = alloc >= pend - 0.01 ? 'FULL' : 'PARTIAL';
+    var statusColor = status === 'FULL' ? '#34A853' : '#F9AB00';
+    var label = (e.item && String(e.item).trim()) ? e.item : ('Sale ' + (e.saleDate || ''));
+    lines.push(
+      '<div style="display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:1px dashed #BFDBFE;gap:8px">' +
+        '<span style="color:#475569;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0">' +
+          (idx++) + '. ' + escHTML(label) +
+          ' <span style="color:' + statusColor + ';font-size:9px;font-weight:700">[' + status + ']</span>' +
+          ' <span style="color:#94A3B8;font-size:10px">of ₹' + _ruFmt(pend) + '</span></span>' +
+        '<span style="font-weight:700;color:#137333;flex-shrink:0">₹' + _ruFmt(alloc) + '</span>' +
+      '</div>'
+    );
+  });
+
+  if (remaining > 0.5) {
+    lines.push(
+      '<div style="display:flex;justify-content:space-between;font-size:11px;padding:6px 8px;margin-top:6px;background:#FEF7E0;border-radius:5px">' +
+        '<span style="color:#8a4200;font-weight:700"><i class="fas fa-exclamation-triangle"></i> Unallocated</span>' +
+        '<span style="font-weight:800;color:#8a4200">₹' + _ruFmt(remaining) + '</span>' +
+      '</div>'
+    );
+  }
+
+  box.innerHTML = '<div style="font-size:10.5px;font-weight:700;color:#1967D2;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">' +
+    '<i class="fas fa-layer-group" style="margin-right:4px"></i>FIFO Allocation (oldest first)' +
+    '</div>' + lines.join('');
+  box.style.display = 'block';
+}
+
+// Hook amount input for live FIFO preview
+(function _hookRetailAmount() {
+  setInterval(function() {
+    var amtEl = document.getElementById('rpt-amount');
+    if (amtEl && !amtEl._retailHooked) {
+      amtEl._retailHooked = true;
+      amtEl.addEventListener('input', function() {
+        amtEl.dataset.userEdited = '1';
+        _rptUpdateFIFO();
+      });
+    }
+  }, 500);
+})();
+
+// ---- Submit retail payment ----
+function _rptSubmit() {
+  if (!_rptSelectedCustomer) { Swal.fire('Required', 'Select a customer', 'warning'); return; }
+  var amt = parseFloat(document.getElementById('rpt-amount').value) || 0;
+  if (amt <= 0) { Swal.fire('Required', 'Enter valid amount', 'warning'); return; }
+
+  var data = {
+    customer: _rptSelectedCustomer,
+    amount: amt,
+    paymentDate: document.getElementById('rpt-date').value
+      ? (function(){var d=new Date(document.getElementById('rpt-date').value);
+          return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();})()
+      : '',
+    mode: document.getElementById('rpt-mode').value,
+    refNo: document.getElementById('rpt-ref').value,
+    remarks: document.getElementById('rpt-remarks').value
+  };
+
+  Swal.fire({ title: 'Recording...', didOpen: () => Swal.showLoading(), background: '#0F172A', color: '#fff' });
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (r.success) {
+        Swal.fire({ icon: 'success', title: 'Payment Recorded!', html: r.msg, timer: 2500, showConfirmButton: false });
+        _rptResetRetailTab();
+        _loadRetailCustomers();
+        // Refresh dashboard card
+        _refreshRetailOutstanding();
+      } else {
+        Swal.fire('Error', r.error || 'Failed', 'error');
+      }
+    })
+    .withFailureHandler(function(e) {
+      Swal.fire('Error', (e && e.message) || 'Network error', 'error');
+    })
+    .recordRetailPayment(data, URL_NAME);
+}
+
+function _rptResetRetailTab() {
+  ['rpt-amount', 'rpt-ref', 'rpt-remarks'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) { el.value = ''; delete el.dataset.userEdited; }
+  });
+  var box = document.getElementById('rpt-retail-entries-box');
+  if (box) box.style.display = 'none';
+  var fb = document.getElementById('rpt-retail-fifo-breakdown');
+  if (fb) { fb.style.display = 'none'; fb.innerHTML = ''; }
+  _rptSelectedCustomer = '';
+  _rptEntries = [];
+  var inp = document.getElementById('rpt-retail-cust-ss-inp');
+  if (inp) inp.value = '';
+  if (_ssState['rpt-retail-cust-ss']) { _ssState['rpt-retail-cust-ss'].value = ''; _ssState['rpt-retail-cust-ss'].text = ''; }
+  var badge = document.getElementById('rpt-prefill-badge');
+  if (badge) badge.remove();
+}
+
+// ---- Hook the submit button — replace the footer button's onclick ----
+// The RP modal footer has "Record Payment" button. We'll make it tab-aware.
+(function _hookRPSubmit() {
+  setInterval(function() {
+    var modal = document.getElementById('rp-modal');
+    if (!modal || !modal.classList.contains('show')) return;
+    var btn = modal.querySelector('.modal-ft .btn-green');
+    if (btn && !btn._tabHooked) {
+      btn._tabHooked = true;
+      // Save original onclick (from HTML)
+      var origClick = btn.onclick;
+      btn.onclick = function(e) {
+        if (_rpActiveTab === 'retail') {
+          e.preventDefault();
+          _rptSubmit();
+        } else {
+          if (typeof origClick === 'function') origClick.call(btn, e);
+          else if (typeof submitPayment === 'function') submitPayment();
+        }
+      };
+    }
+  }, 500);
+})();
+
+// ---- Reset tab on modal open (skip if opening for retail prefill) ----
+var _rpOpenAsRetail = false;
+var _origOpenRPModal = openRPModal;
+openRPModal = function() {
+  _origOpenRPModal.apply(this, arguments);
+  setTimeout(function() {
+    if (_rpOpenAsRetail) {
+      // Retail prefill path owns tab switching — do not reset
+      _rpOpenAsRetail = false;
+      return;
+    }
+    _switchRPTab('invoice');
+    _rptResetRetailTab();
+  }, 40);
+};
+
+// ============================================================
+// RETAIL OUTSTANDING — Dashboard + Retail Sales view
+// ============================================================
+
+function _refreshRetailOutstanding() {
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (!r || !r.success) return;
+      // Dashboard card
+      txt('s-retail-out', '₹' + _ruFmt(r.totalOutstanding || 0));
+      txt('s-retail-cust-count', r.customerCount || 0);
+
+      // Retail sales view card
+      var totalBadge = document.getElementById('rs-out-total-badge');
+      if (totalBadge) totalBadge.textContent = '₹' + _ruFmt(r.totalOutstanding || 0);
+
+      var listEl = document.getElementById('rs-outstanding-list');
+      if (!listEl) return;
+
+      var top = r.topCustomers || [];
+      if (!top.length) {
+        listEl.innerHTML = '<div style="text-align:center;padding:20px;color:var(--green);font-size:12px">' +
+          '<i class="fas fa-check-circle" style="font-size:20px;display:block;margin-bottom:6px"></i>' +
+          'Sab retail customers settled hain!' +
+          '</div>';
+        return;
+      }
+
+      listEl.innerHTML = top.map(function(c) {
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 4px;border-bottom:1px solid #F1F5F9;gap:10px">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-weight:600;font-size:12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + escHTML(c.name) + '</div>' +
+            '<div style="font-size:10px;color:var(--muted);margin-top:2px">' + c.entries + ' entries · oldest: ' + c.oldestDateStr + '</div>' +
+          '</div>' +
+          '<div style="text-align:right;flex-shrink:0">' +
+            '<div style="font-weight:800;color:#7C3AED;font-size:13px">₹' + _ruFmt(c.pending) + '</div>' +
+          '</div>' +
+          '<button class="act-btn ab-fu" style="margin-left:4px" onclick="_openRetailStatement(\'' + escQ(c.name) + '\')" title="View Statement"><i class="fas fa-file-invoice"></i></button>' +
+          '<button class="act-btn ab-pay" style="margin-left:2px" onclick="_rptQuickPay(\'' + escQ(c.name) + '\')" title="Record Payment"><i class="fas fa-indian-rupee-sign"></i></button>' +
+        '</div>';
+      }).join('');
+    })
+    .getRetailOutstandingSummary();
+}
+
+function _rptQuickPay(customerName) {
+  var name = (customerName || '').trim();
+  if (!name) return;
+  _rptSelectedCustomer = name;
+  _rpOpenAsRetail = true; // prevent openRPModal from resetting to invoice tab
+
+  // Warm cache if needed (non-blocking)
+  if (!_retailData.allRows || !_retailData.allRows.length) {
+    google.script.run
+      .withSuccessHandler(function(r) {
+        if (r && r.success) {
+          _retailData.allRows = r.rows || [];
+          if (_rpActiveTab === 'retail' && _rptSelectedCustomer === name) {
+            _loadRetailCustomers(name);
+            _loadRetailEntriesLocalOrRemote(name);
+          }
+        }
+      })
+      .getRetailData();
+  }
+
+  openRPModal();
+
+  // After modal paints, switch to retail + prefill (longer than override timeout)
+  setTimeout(function() {
+    _rpActiveTab = 'retail';
+    var invBtn = document.getElementById('rp-tab-invoice-btn');
+    var rtBtn  = document.getElementById('rp-tab-retail-btn');
+    var invCont = document.getElementById('rp-tab-invoice-content');
+    var rtCont  = document.getElementById('rp-tab-retail-content');
+    var activeStyle = 'flex:1;padding:9px;border-radius:7px;border:none;cursor:pointer;font-size:12.5px;font-weight:700;background:#fff;color:#7C3AED;box-shadow:0 1px 4px rgba(0,0,0,.08)';
+    var inactiveStyle = 'flex:1;padding:9px;border-radius:7px;border:none;cursor:pointer;font-size:12.5px;font-weight:600;background:transparent;color:var(--muted)';
+    if (invBtn) invBtn.style.cssText = inactiveStyle;
+    if (rtBtn) rtBtn.style.cssText = activeStyle;
+    if (invCont) invCont.style.display = 'none';
+    if (rtCont) rtCont.style.display = 'block';
+
+    if (typeof _setDefaultDates === 'function') _setDefaultDates();
+
+    // Instant customer list + badge from local data
+    _loadRetailCustomers(name);
+    // Instant pending entries from local data (no wait for API)
+    _loadRetailEntriesLocalOrRemote(name);
+  }, 120);
+}
+
+/** Build pending entries for a customer from local _retailData (instant) */
+function _retailEntriesFromCache(customerName) {
+  var target = (customerName || '').toLowerCase().trim();
+  var rows = (_retailData.allRows || []).filter(function(r) {
+    return (r.customer || '').toLowerCase().trim() === target && (parseFloat(r.pending) || 0) > 0.01;
+  });
+  rows.sort(function(a, b) {
+    var da = parseIST(a.saleDate), db = parseIST(b.saleDate);
+    return (da ? da.getTime() : 0) - (db ? db.getTime() : 0); // FIFO oldest first
+  });
+  return rows.map(function(r, i) {
+    return {
+      rowIndex: i,
+      uid: r.uid,
+      saleDate: r.saleDate,
+      customer: r.customer,
+      item: r.item || '',
+      qty: r.qty != null ? r.qty : r.qtySummary,
+      unit: r.unit || '',
+      amount: r.amount != null ? r.amount : r.totalAmount,
+      paid: r.paid || 0,
+      pending: r.pending || 0,
+      settledDate: r.settledDate || ''
+    };
+  });
+}
+
+function _loadRetailEntriesLocalOrRemote(customerName) {
+  var box = document.getElementById('rpt-retail-entries-box');
+  var list = document.getElementById('rpt-retail-entries-list');
+  if (!box || !list) return;
+
+  // Instant from cache
+  var local = _retailEntriesFromCache(customerName);
+  if (local.length) {
+    _rptEntries = local;
+    var totalPending = local.reduce(function(s, e) { return s + (e.pending || 0); }, 0);
+    txt('rpt-total-pending', '₹' + _ruFmt(totalPending));
+    txt('rpt-entry-count', local.length);
+    box.style.display = 'block';
+    _renderRetailEntriesList();
+    var amtEl = document.getElementById('rpt-amount');
+    // Always bind amount to current customer's pending on load/switch
+    if (amtEl) amtEl.value = Math.round(totalPending * 100) / 100;
+    if (typeof _rptUpdateFIFO === 'function') _rptUpdateFIFO();
+  } else {
+    list.innerHTML = '<div style="padding:10px;font-size:12px;color:var(--muted)"><i class="fas fa-spinner fa-spin" style="margin-right:6px"></i>Loading entries...</div>';
+    box.style.display = 'block';
+  }
+
+  // Background confirm from server
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (!r || !r.success) {
+        if (!local.length) list.innerHTML = '<div style="color:var(--red);padding:10px;font-size:12px">Failed to load entries</div>';
+        return;
+      }
+      _rptEntries = r.entries || [];
+      if (!_rptEntries.length) {
+        list.innerHTML = '<div style="padding:14px;text-align:center;color:var(--green);font-size:12px">Koi pending entry nahi.</div>';
+        return;
+      }
+      var totalPending = _rptEntries.reduce(function(s, e) { return s + e.pending; }, 0);
+      txt('rpt-total-pending', '₹' + _ruFmt(totalPending));
+      txt('rpt-entry-count', _rptEntries.length);
+      box.style.display = 'block';
+      _renderRetailEntriesList();
+      var amtEl = document.getElementById('rpt-amount');
+      if (amtEl) {
+        // Keep user's typed amount only if they already edited away from previous pending;
+        // on customer switch local path already set the value — refresh to server truth if empty or was auto
+        if (!amtEl.dataset.userEdited) {
+          amtEl.value = Math.round(totalPending * 100) / 100;
+        }
+      }
+      if (typeof _rptUpdateFIFO === 'function') _rptUpdateFIFO();
+    })
+    .withFailureHandler(function(e) {
+      if (!local.length) {
+        list.innerHTML = '<div style="color:var(--red);padding:10px;font-size:12px">Error: ' + ((e && e.message) || 'Network') + '</div>';
+      }
+    })
+    .getRetailEntriesForCustomer(customerName);
+}
+
+
+function _openRetailStatement(customerName) {
+  _rstmtCustomer = customerName;
+  document.getElementById('rstmt-title').innerHTML =
+    '<i class="fas fa-file-invoice" style="margin-right:8px;color:#7C3AED"></i>Statement: ' + escHTML(customerName);
+  document.getElementById('rstmt-sub').textContent = 'All retail entries for this customer';
+  document.getElementById('rstmt-body').innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">Loading...</div>';
+  document.getElementById('retail-stmt-modal').classList.add('show');
+
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (!r || !r.success) { document.getElementById('rstmt-body').innerHTML = 'Failed to load'; return; }
+      var entries = r.entries || [];
+      if (!entries.length) {
+        document.getElementById('rstmt-body').innerHTML =
+          '<div style="text-align:center;padding:30px;color:var(--green)">' +
+            '<i class="fas fa-check-circle" style="font-size:32px;margin-bottom:10px;display:block"></i>' +
+            'No pending entries.' +
+          '</div>';
+        return;
+      }
+
+      var totalPending = entries.reduce(function(s, e) { return s + e.pending; }, 0);
+      var totalPaid    = entries.reduce(function(s, e) { return s + e.paid; }, 0);
+      var totalAmt     = entries.reduce(function(s, e) { return s + e.amount; }, 0);
+
+      var rows = entries.map(function(e, i) {
+        var d = parseIST(e.saleDate);
+        var days = d ? Math.floor((new Date() - d) / 86400000) : 0;
+        var ageColor = days > 60 ? '#EA4335' : days > 30 ? '#F9AB00' : '#94A3B8';
+        return '<tr>' +
+          '<td style="font-size:11px;color:var(--muted);text-align:center">' + (i + 1) + '</td>' +
+          '<td style="font-size:11px">' + escHTML(e.saleDate) + '</td>' +
+          '<td style="font-weight:600">' + escHTML(e.item) + '</td>' +
+          '<td class="num">' + e.qty + ' ' + escHTML(e.unit) + '</td>' +
+          '<td class="num">₹' + _ruFmt(e.amount) + '</td>' +
+          '<td class="num" style="color:var(--green)">₹' + _ruFmt(e.paid) + '</td>' +
+          '<td class="num" style="font-weight:700;color:var(--red)">₹' + _ruFmt(e.pending) + '</td>' +
+          '<td style="text-align:center;color:' + ageColor + ';font-size:11px;font-weight:600">' + days + 'd</td>' +
+        '</tr>';
+      }).join('');
+
+      document.getElementById('rstmt-body').innerHTML =
+        '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">' +
+          '<div style="background:#E8F0FE;border-radius:8px;padding:10px 14px">' +
+            '<div style="font-size:10px;color:#1967D2;font-weight:700;text-transform:uppercase">Total Amount</div>' +
+            '<div style="font-size:18px;font-weight:800;color:#1967D2;margin-top:4px">₹' + _ruFmt(totalAmt) + '</div>' +
+          '</div>' +
+          '<div style="background:#E6F4EA;border-radius:8px;padding:10px 14px">' +
+            '<div style="font-size:10px;color:#137333;font-weight:700;text-transform:uppercase">Total Paid</div>' +
+            '<div style="font-size:18px;font-weight:800;color:#137333;margin-top:4px">₹' + _ruFmt(totalPaid) + '</div>' +
+          '</div>' +
+          '<div style="background:#FCE8E6;border-radius:8px;padding:10px 14px">' +
+            '<div style="font-size:10px;color:#C5221F;font-weight:700;text-transform:uppercase">Pending</div>' +
+            '<div style="font-size:18px;font-weight:800;color:#C5221F;margin-top:4px">₹' + _ruFmt(totalPending) + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="tbl-wrap">' +
+          '<table class="tbl"><thead><tr>' +
+            '<th style="text-align:center">#</th><th>Date</th><th>Item</th><th class="num">Qty</th>' +
+            '<th class="num">Amount</th><th class="num">Paid</th><th class="num">Pending</th><th style="text-align:center">Age</th>' +
+          '</tr></thead><tbody>' + rows + '</tbody></table>' +
+        '</div>';
+    })
+    .getRetailEntriesForCustomer(customerName);
+}
+
+function closeRetailStatement() {
+  document.getElementById('retail-stmt-modal').classList.remove('show');
+}
+
+function _rstmtPay() {
+  if (!_rstmtCustomer) return;
+  closeRetailStatement();
+  setTimeout(function() { _rptQuickPay(_rstmtCustomer); }, 200);
+}
+window._rptQuickPay = _rptQuickPay;
+window._openRetailStatement = _openRetailStatement;
+window._rstmtPay = _rstmtPay;
+
+
+function _rstmtPrint() {
+  var body = document.getElementById('rstmt-body').innerHTML;
+  var customer = _rstmtCustomer;
+  var w = window.open('', '_blank');
+  w.document.write(
+    '<html><head><title>Statement — ' + customer + '</title>' +
+    '<style>' +
+    'body{font-family:Inter,Arial,sans-serif;padding:20px;color:#1e293b}' +
+    'h2{margin-bottom:4px}' +
+    '.meta{color:#64748b;font-size:12px;margin-bottom:20px}' +
+    'table{width:100%;border-collapse:collapse;font-size:12px}' +
+    'th{background:#F8FAFC;padding:8px;text-align:left;border-bottom:2px solid #E2E8F0;font-size:10px;text-transform:uppercase;color:#64748b}' +
+    'td{padding:8px;border-bottom:1px solid #F1F5F9}' +
+    '.num{text-align:right}' +
+    '</style></head><body>' +
+    '<h2>Retail Statement — ' + customer + '</h2>' +
+    '<div class="meta">Generated on ' + new Date().toLocaleString('en-IN') + '</div>' +
+    body +
+    '<div style="margin-top:24px;font-size:11px;color:#94A3B8;text-align:center">— Fresko Retail Statement —</div>' +
+    '</body></html>'
+  );
+  w.document.close();
+  setTimeout(function() { w.print(); }, 300);
+}
+
+
+
+// ============================================================
+// MODE SYSTEM — Supply vs Retail
+// ============================================================
+// - Login ke baad welcome screen pe mode choose karta hai
+// - Topbar pe switch button se kabhi bhi mode change
+// - localStorage mein save — refresh ke baad yaad rehta hai
+// - Nav items, sections, aur default view mode ke hisaab se badalte hain
+// ============================================================
+
+/**
+ * Switch mode without logout (called from topbar dropdown)
+ */
+function switchMode(mode) {
+  if (mode !== 'supply' && mode !== 'retail') return;
+  if (mode === _activeMode) {
+    _closeModeDropdown();
+    return;
+  }
+  _activeMode = mode;
+  try { localStorage.setItem('fresko_mode', mode); } catch(e) {}
+  _applyModeUI();
+  _navigateToDefaultView();
+  _closeModeDropdown();
+
+  // ── Toast confirmation ────────────────────────────────────
+  var label = (mode === 'retail') ? 'Retail' : 'Supply';
+  var icon = (mode === 'retail') ? 'store' : 'building';
+  _optimisticToast('Switched to ' + label + ' mode');
+}
+
+/**
+ * Toggle mode dropdown in topbar
+ */
+function _toggleModeDropdown() {
+  var dd = document.getElementById('mode-dropdown');
+  if (!dd) return;
+  dd.classList.toggle('show');
+  // Close on outside click
+  setTimeout(function() {
+    document.addEventListener('click', _closeModeDropdownOnOutside, { once: true });
+  }, 10);
+}
+
+function _closeModeDropdownOnOutside(e) {
+  if (!e.target.closest('#mode-switch-btn') && !e.target.closest('#mode-dropdown')) {
+    _closeModeDropdown();
+  } else {
+    // Clicked inside — re-attach listener
+    setTimeout(function() {
+      document.addEventListener('click', _closeModeDropdownOnOutside, { once: true });
+    }, 10);
+  }
+}
+
+function _closeModeDropdown() {
+  var dd = document.getElementById('mode-dropdown');
+  if (dd) dd.classList.remove('show');
+}
+
+/**
+ * Navigate to the correct default view for current mode
+ */
+function _navigateToDefaultView() {
+  var home = (_activeMode === 'retail') ? RETAIL_HOME_VIEW : SUPPLY_HOME_VIEW;
+  _activeView = home;
+  nav(home);
+}
+
+/**
+ * Apply mode-based UI (show/hide nav items + sections + topbar badge)
+ */
+function _applyModeUI() {
+  var isRetail = (_activeMode === 'retail');
+
+  // ── 1. Nav items visibility ───────────────────────────────
+  // First hide ALL mode-specific nav items
+  SUPPLY_NAV_ITEMS.concat(RETAIL_NAV_ITEMS).forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+
+  // Then show items for current mode
+  var itemsToShow = isRetail ? RETAIL_NAV_ITEMS : SUPPLY_NAV_ITEMS;
+  itemsToShow.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) {
+      // Respect admin-only visibility (handled by _applyPermissions)
+      // Only override display if this isn't an admin-only element
+      var isAdminOnly = el.classList.contains('nav-admin-only');
+      if (!isAdminOnly) {
+        el.style.display = 'flex';
+      } else {
+        // Let _applyPermissions decide
+        el.style.display = window._isAdmin ? 'flex' : 'none';
+      }
+    }
+  });
+
+  // ── 2. Section labels + dividers visibility ───────────────
+  // Elements with data-mode attribute: show only if matches current mode
+  // Elements with data-mode="all": always show
+  document.querySelectorAll('[data-mode]').forEach(function(el) {
+    var m = el.getAttribute('data-mode');
+    if (m === 'all') {
+      el.style.display = '';
+    } else if (m === 'supply') {
+      el.style.display = isRetail ? 'none' : '';
+    } else if (m === 'retail') {
+      el.style.display = isRetail ? '' : 'none';
+    }
+  });
+
+  // ── 3. Topbar mode indicator ──────────────────────────────
+  var modeLabel = document.getElementById('mode-current-label');
+  if (modeLabel) {
+    modeLabel.textContent = isRetail ? 'Retail' : 'Supply';
+  }
+  var modeIcon = document.getElementById('mode-current-icon');
+  if (modeIcon) {
+    modeIcon.className = isRetail ? 'fas fa-store' : 'fas fa-building';
+  }
+  var modeBtn = document.getElementById('mode-switch-btn');
+  if (modeBtn) {
+    if (isRetail) {
+      modeBtn.style.background = '#F5F3FF';
+      modeBtn.style.color = '#7C3AED';
+      modeBtn.style.borderColor = '#DDD6FE';
+    } else {
+      modeBtn.style.background = '#E8F0FE';
+      modeBtn.style.color = '#1967D2';
+      modeBtn.style.borderColor = '#BFDBFE';
+    }
+  }
+
+  // ── 4. Highlight active item in dropdown ──────────────────
+  document.querySelectorAll('.mode-option').forEach(function(el) {
+    el.classList.toggle('active', el.getAttribute('data-mode-option') === _activeMode);
+  });
+
+  // ── 5. Body class for CSS targeting ───────────────────────
+  document.body.classList.toggle('mode-retail', isRetail);
+  document.body.classList.toggle('mode-supply', !isRetail);
+}
+
+/**
+ * Read saved mode preference (called on app load)
+ */
+function _loadModePreference() {
+  try {
+    var saved = localStorage.getItem('fresko_mode');
+    if (saved === 'retail' || saved === 'supply') {
+      _activeMode = saved;
+    }
+  } catch (e) {}
+}
+
+// ============================================================
+// RETAIL DASHBOARD (Part 3)
+// ============================================================
+// Layout: 4 stat cards on top + Customer-wise outstanding table
+//         + Quick Actions / Recent Activity panel on right
+// ============================================================
+
+function renderRetailDashboard() {
+  var dateEl = document.getElementById('rd-date');
+  if (dateEl) {
+    dateEl.textContent = new Date().toLocaleDateString('en-IN', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+    });
+  }
+
+  // Cache-first instant paint
+  if (_retailData.allRows && _retailData.allRows.length > 0) {
+    _renderRetailDashboardContent();
+  }
+
+  google.script.run
+    .withSuccessHandler(function (r) {
+      if (r && r.success) _retailData.allRows = r.rows || [];
+      _renderRetailDashboardContent();
+    })
+    .withFailureHandler(function () {
+      if (!_retailData.allRows || !_retailData.allRows.length) _renderRetailDashboardContent();
+    })
+    .getRetailData();
+}
+
+function _renderRetailDashboardContent() {
+  var rows = _retailData.allRows || [];
+
+  // ── Stats computation ────────────────────────────────────
+  var totalPending = 0;
+  var pendingCustomers = {};
+  var byCustomer = {};
+
+  rows.forEach(function (r) {
+    var p = r.pending || 0;
+    var c = r.customer || 'Unknown';
+    totalPending += p;
+    if (p > 0.01) {
+      pendingCustomers[c] = true;
+      if (!byCustomer[c]) {
+        byCustomer[c] = { name: c, pending: 0, entries: 0, oldestDate: null };
+      }
+      byCustomer[c].pending += p;
+      byCustomer[c].entries++;
+      var d = parseIST(r.saleDate);
+      if (d && (!byCustomer[c].oldestDate || d < byCustomer[c].oldestDate)) {
+        byCustomer[c].oldestDate = d;
+      }
+    }
+  });
+
+  txt('rd-total-pending', '₹' + _ruFmt(totalPending));
+  txt('rd-pending-cust', Object.keys(pendingCustomers).length);
+  txt('rd-total-entries', rows.length);
+
+  // This month retail collections
+  var monthAmt = 0;
+  var monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  (DB.payments || []).forEach(function (p) {
+    if (p.paymentType !== 'Retail') return;
+    var pd = parseIST(p.paymentDate);
+    if (pd && pd >= monthStart) monthAmt += p.amount || 0;
+  });
+  txt('rd-this-month', '₹' + _ruFmt(monthAmt));
+
+  // ── Customer-wise outstanding table ──────────────────────
+  var custList = Object.keys(byCustomer).map(function (k) { return byCustomer[k]; })
+    .sort(function (a, b) { return b.pending - a.pending; });
+
+  var tbody = document.getElementById('rd-cust-tbody');
+  if (tbody) {
+    if (!custList.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="center" style="padding:32px;color:var(--muted);font-size:12px">' +
+        '<i class="fas fa-check-circle" style="color:var(--green);font-size:22px;display:block;margin-bottom:8px"></i>' +
+        'Sab retail customers settled hain!' +
+        '</td></tr>';
+    } else {
+      tbody.innerHTML = custList.slice(0, 15).map(function (c) {
+        var oldestStr = c.oldestDate ? _fmtDateShort(c.oldestDate) : '--';
+        var daysOld = c.oldestDate ? Math.floor((new Date() - c.oldestDate) / 86400000) : 0;
+        var ageColor = daysOld > 60 ? '#EA4335' : daysOld > 30 ? '#F9AB00' : '#64748B';
+        return '<tr style="cursor:pointer" onclick="_openRetailStatement(\'' + escQ(c.name) + '\')">' +
+          '<td style="font-weight:600;font-size:12px">' +
+            '<span style="vertical-align:middle">' + escHTML(c.name) + '</span>' +
+            (daysOld > 0 ? ' <span style="font-size:9px;font-weight:700;color:' + ageColor + ';margin-left:4px">' + daysOld + 'd</span>' : '') +
+            ' <button type="button" class="act-btn ab-pay" style="margin-left:6px;vertical-align:middle" onclick="event.stopPropagation();_rptQuickPay(\'' + escQ(c.name) + '\')" title="Record Payment"><i class="fas fa-indian-rupee-sign"></i></button>' +
+            ' <button type="button" class="act-btn ab-fu" style="margin-left:2px;vertical-align:middle" onclick="event.stopPropagation();openRetailFUModal(\'' + escQ(c.name) + '\')" title="Log Follow-up"><i class="fas fa-phone-alt"></i></button>' +
+          '</td>' +
+          '<td class="num" style="color:var(--red);font-weight:700;font-size:13px">₹' + _ruFmt(c.pending) + '</td>' +
+          '<td class="num" style="color:var(--muted)">' + c.entries + '</td>' +
+          '<td style="font-size:10px;color:var(--muted)">' + oldestStr + '</td>' +
+          '</tr>';
+      }).join('');
+    }
+  }
+
+  // ── Recent Activity ──────────────────────────────────────
+  _renderRetailRecentActivity();
+}
+
+function _renderRetailRecentActivity() {
+  var el = document.getElementById('rd-recent-activity');
+  if (!el) return;
+
+  var payments = (DB.payments || []).filter(function (p) { return p.paymentType === 'Retail'; });
+  payments.sort(function (a, b) {
+    var da = parseIST(a.paymentDate), db = parseIST(b.paymentDate);
+    return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+  });
+  var recent = payments.slice(0, 5);
+
+  if (!recent.length) {
+    el.innerHTML = '<div style="text-align:center;padding:14px;color:var(--muted);font-size:12px">' +
+      '<i class="fas fa-inbox" style="display:block;font-size:20px;margin-bottom:6px;opacity:.4"></i>' +
+      'No recent payments</div>';
+    return;
+  }
+
+  el.innerHTML = recent.map(function (p) {
+    return '<div style="display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid #F1F5F9;font-size:11px">' +
+      '<div style="min-width:0;flex:1">' +
+        '<div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHTML(p.partyName || '--') + '</div>' +
+        '<div style="color:var(--muted);font-size:10px;margin-top:1px">' + escHTML(p.paymentDate) + ' · ' + escHTML(p.mode || '--') + '</div>' +
+      '</div>' +
+      '<div style="font-weight:700;color:var(--green);flex-shrink:0">₹' + _ruFmt(p.amount || 0) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// ── Quick Action Handlers ────────────────────────────────────
+function _rdQuickUpload() { nav('retailUpload'); }
+function _rdQuickAddCust() { openAddRetailCustomerModal(); }
+function _rdQuickRecordPay() {
+  openRPModal();
+  setTimeout(function () {
+    if (typeof _switchRPTab === 'function') _switchRPTab('retail');
+  }, 120);
+}
+function _rdQuickCustomers() { nav('retailCustomers'); }
+function _rdQuickPayments() { nav('retailPayments'); }
+
+// ============================================================
+// RETAIL CUSTOMERS VIEW (Part 3)
+// ============================================================
+
+function _loadAllRetailCustomers(cb) {
+  google.script.run
+    .withSuccessHandler(function(r) {
+      if (r && r.success) DB.retailCustomers = r.customers || [];
+      if (typeof cb === 'function') cb(r);
+    })
+    .withFailureHandler(function() {
+      if (typeof cb === 'function') cb(null);
+    })
+    .getRetailCustomers();
+}
+
+function renderRetailCustomers() {
+  var q = ((document.getElementById('rc-search') || {}).value || '').toLowerCase();
+  // If customers not loaded yet, fetch then re-render
+  if (!(DB.retailCustomers && DB.retailCustomers.length) && !renderRetailCustomers._loading) {
+    renderRetailCustomers._loading = true;
+    var tbody0 = document.getElementById('rc-tbody');
+    if (tbody0) tbody0.innerHTML = '<tr><td colspan="6" class="center" style="padding:24px;color:var(--muted)">Loading...</td></tr>';
+    _loadAllRetailCustomers(function() {
+      renderRetailCustomers._loading = false;
+      renderRetailCustomers();
+    });
+    return;
+  }
+  var customers = DB.retailCustomers || [];
+
+  var list = customers.filter(function (c) {
+    if (!q) return true;
+    return (c.name || '').toLowerCase().includes(q) ||
+      (c.phone || '').toLowerCase().includes(q) ||
+      (c.city || '').toLowerCase().includes(q) ||
+      (c.customerID || '').toLowerCase().includes(q);
+  });
+
+  txt('rc-sub', list.length + ' customers');
+
+  var tbody = document.getElementById('rc-tbody');
+  if (!tbody) return;
+
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="center" style="padding:32px;color:var(--muted);font-size:12px">' +
+      (q ? 'No customers match your search' :
+        '<i class="fas fa-users" style="display:block;font-size:22px;margin-bottom:8px;opacity:.4"></i>No retail customers yet. Upload a PDF or add manually.') +
+      '</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = list.map(function (c) {
+    var phoneDisplay = c.phone
+      ? '<a href="tel:' + escQ(c.phone) + '" style="color:var(--primary);text-decoration:none">' + escHTML(c.phone) + '</a>'
+      : '<span style="color:var(--muted)">--</span>';
+
+    var waBtn = c.phone
+      ? '<a href="https://wa.me/91' + c.phone.replace(/\D/g, '') + '" target="_blank" class="act-btn ab-wa" title="WhatsApp" style="text-decoration:none"><i class="fab fa-whatsapp"></i></a>'
+      : '';
+
+    var statusBadge = (c.status === 'Inactive')
+      ? '<span class="badge badge-inactive">Inactive</span>'
+      : '<span class="badge badge-active">Active</span>';
+
+    return '<tr>' +
+      '<td style="font-family:monospace;font-size:11px;color:var(--muted)">' + escHTML(c.customerID) + '</td>' +
+      '<td style="font-weight:600;font-size:12px">' + escHTML(c.name) + '</td>' +
+      '<td style="font-size:12px">' + phoneDisplay + '</td>' +
+      '<td style="font-size:12px">' + (c.city ? escHTML(c.city) : '<span style="color:var(--muted)">--</span>') + '</td>' +
+      '<td>' + statusBadge + '</td>' +
+      '<td style="white-space:nowrap;text-align:right">' +
+        waBtn +
+        '<button class="act-btn ab-view" style="margin-left:2px" onclick="_openRetailStatement(\'' + escQ(c.name) + '\')" title="Statement"><i class="fas fa-file-invoice"></i></button>' +
+        '<button class="act-btn ab-edit" style="margin-left:2px" onclick="openEditRetailCustomerModal(\'' + escQ(c.customerID) + '\')" title="Edit"><i class="fas fa-edit"></i></button>' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+// ============================================================
+// RETAIL CUSTOMER ADD / EDIT (Swal form)
+// ============================================================
+
+function openAddRetailCustomerModal() {
+  Swal.fire({
+    title: '<i class="fas fa-user-plus" style="color:#7C3AED"></i> Add Retail Customer',
+    html:
+      '<div style="text-align:left;font-size:13px">' +
+        '<label style="font-weight:600;color:#334155;display:block;margin-bottom:4px">Name <span style="color:#EA4335">*</span></label>' +
+        '<input id="rcf-name" class="swal2-input" placeholder="Customer name" style="width:100%;margin:0 0 12px 0;font-size:13px">' +
+        '<label style="font-weight:600;color:#334155;display:block;margin-bottom:4px">Phone <span style="font-weight:400;color:#94A3B8">(optional — WhatsApp ke liye)</span></label>' +
+        '<input id="rcf-phone" class="swal2-input" placeholder="10-digit mobile" style="width:100%;margin:0 0 12px 0;font-size:13px">' +
+        '<label style="font-weight:600;color:#334155;display:block;margin-bottom:4px">City <span style="font-weight:400;color:#94A3B8">(optional)</span></label>' +
+        '<input id="rcf-city" class="swal2-input" placeholder="City" style="width:100%;margin:0 0 12px 0;font-size:13px">' +
+        '<label style="font-weight:600;color:#334155;display:block;margin-bottom:4px">Notes <span style="font-weight:400;color:#94A3B8">(optional)</span></label>' +
+        '<textarea id="rcf-notes" class="swal2-textarea" placeholder="Any notes..." style="width:100%;margin:0;font-size:13px;min-height:60px"></textarea>' +
+      '</div>',
+    showCancelButton: true,
+    confirmButtonText: '<i class="fas fa-save"></i> Create Customer',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#7C3AED',
+    cancelButtonColor: '#64748B',
+    width: 460,
+    preConfirm: function () {
+      var name = (document.getElementById('rcf-name').value || '').trim();
+      if (!name) {
+        Swal.showValidationMessage('Customer name is required');
+        return false;
+      }
+      return {
+        name: name,
+        phone: (document.getElementById('rcf-phone').value || '').trim(),
+        city: (document.getElementById('rcf-city').value || '').trim(),
+        notes: (document.getElementById('rcf-notes').value || '').trim(),
+        status: 'Active'
+      };
+    }
+  }).then(function (result) {
+    if (!result.isConfirmed) return;
+    Swal.fire({ title: 'Creating...', didOpen: function () { Swal.showLoading(); }, background: '#0F172A', color: '#fff' });
+    google.script.run
+      .withSuccessHandler(function (r) {
+        if (r.success) {
+          Swal.fire({ icon: 'success', title: 'Customer Created!', text: r.msg, timer: 1800, showConfirmButton: false });
+          _silentDataRefresh();
+        } else {
+          Swal.fire('Error', r.error || 'Failed', 'error');
+        }
+      })
+      .withFailureHandler(function (e) {
+        Swal.fire('Error', (e && e.message) || 'Network error', 'error');
+      })
+      .createRetailCustomer(result.value, (USER && USER.name) || URL_NAME);
+  });
+}
+
+function openEditRetailCustomerModal(customerID) {
+  var c = (DB.retailCustomers || []).find(function (x) { return x.customerID === customerID; });
+  if (!c) { Swal.fire('Error', 'Customer not found', 'error'); return; }
+
+  Swal.fire({
+    title: '<i class="fas fa-user-edit" style="color:#7C3AED"></i> Edit Retail Customer',
+    html:
+      '<div style="text-align:left;font-size:13px">' +
+        '<div style="background:#F8FAFC;border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#64748B">' +
+          'ID: <b style="font-family:monospace">' + escHTML(c.customerID) + '</b>' +
+        '</div>' +
+        '<label style="font-weight:600;color:#334155;display:block;margin-bottom:4px">Name <span style="color:#EA4335">*</span></label>' +
+        '<input id="rcf-name" class="swal2-input" value="' + escHTML(c.name) + '" style="width:100%;margin:0 0 12px 0;font-size:13px">' +
+        '<label style="font-weight:600;color:#334155;display:block;margin-bottom:4px">Phone <span style="font-weight:400;color:#94A3B8">(optional)</span></label>' +
+        '<input id="rcf-phone" class="swal2-input" value="' + escHTML(c.phone || '') + '" placeholder="10-digit mobile" style="width:100%;margin:0 0 12px 0;font-size:13px">' +
+        '<label style="font-weight:600;color:#334155;display:block;margin-bottom:4px">City <span style="font-weight:400;color:#94A3B8">(optional)</span></label>' +
+        '<input id="rcf-city" class="swal2-input" value="' + escHTML(c.city || '') + '" placeholder="City" style="width:100%;margin:0 0 12px 0;font-size:13px">' +
+        '<label style="font-weight:600;color:#334155;display:block;margin-bottom:4px">Status</label>' +
+        '<select id="rcf-status" class="swal2-input" style="width:100%;margin:0 0 12px 0;font-size:13px">' +
+          '<option value="Active"' + (c.status === 'Active' ? ' selected' : '') + '>Active</option>' +
+          '<option value="Inactive"' + (c.status === 'Inactive' ? ' selected' : '') + '>Inactive</option>' +
+        '</select>' +
+        '<label style="font-weight:600;color:#334155;display:block;margin-bottom:4px">Notes <span style="font-weight:400;color:#94A3B8">(optional)</span></label>' +
+        '<textarea id="rcf-notes" class="swal2-textarea" style="width:100%;margin:0;font-size:13px;min-height:60px">' + escHTML(c.notes || '') + '</textarea>' +
+      '</div>',
+    showCancelButton: true,
+    confirmButtonText: '<i class="fas fa-save"></i> Save Changes',
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: '#7C3AED',
+    cancelButtonColor: '#64748B',
+    width: 460,
+    preConfirm: function () {
+      var name = (document.getElementById('rcf-name').value || '').trim();
+      if (!name) {
+        Swal.showValidationMessage('Customer name is required');
+        return false;
+      }
+      return {
+        customerID: c.customerID,
+        name: name,
+        phone: (document.getElementById('rcf-phone').value || '').trim(),
+        city: (document.getElementById('rcf-city').value || '').trim(),
+        notes: (document.getElementById('rcf-notes').value || '').trim(),
+        status: document.getElementById('rcf-status').value
+      };
+    }
+  }).then(function (result) {
+    if (!result.isConfirmed) return;
+    Swal.fire({ title: 'Saving...', didOpen: function () { Swal.showLoading(); }, background: '#0F172A', color: '#fff' });
+    google.script.run
+      .withSuccessHandler(function (r) {
+        if (r.success) {
+          Swal.fire({ icon: 'success', title: 'Saved!', text: r.msg, timer: 1800, showConfirmButton: false });
+          _silentDataRefresh();
+        } else {
+          Swal.fire('Error', r.error || 'Failed', 'error');
+        }
+      })
+      .withFailureHandler(function (e) {
+        Swal.fire('Error', (e && e.message) || 'Network error', 'error');
+      })
+      .updateRetailCustomer(result.value, (USER && USER.name) || URL_NAME);
+  });
+}
+
+// ============================================================
+// RETAIL PAYMENTS VIEW (Part 3)
+// ============================================================
+
+function renderRetailPayments() {
+  var q = ((document.getElementById('rpay-search') || {}).value || '').toLowerCase();
+  var from = (document.getElementById('rpay-from') || {}).value || '';
+  var to = (document.getElementById('rpay-to') || {}).value || '';
+  var modeF = (document.getElementById('rpay-mode-filter') || {}).value || '';
+
+  var list = (DB.payments || []).filter(function (p) {
+    if (p.paymentType !== 'Retail') return false;
+    if (q && !((p.partyName || '').toLowerCase().includes(q) ||
+              (p.refNo || '').toLowerCase().includes(q) ||
+              (p.paymentID || '').toLowerCase().includes(q))) return false;
+    if (modeF && p.mode !== modeF) return false;
+    if (from || to) {
+      var d = parseIST(p.paymentDate);
+      if (from && d && d < new Date(from)) return false;
+      if (to && d && d > new Date(to + 'T23:59:59')) return false;
+    }
+    return true;
+  }).sort(function (a, b) {
+    var da = parseIST(a.paymentDate), db = parseIST(b.paymentDate);
+    return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+  });
+
+  txt('rpay-sub', list.length + ' retail payments');
+  var totalAmt = list.reduce(function (s, p) { return s + (p.amount || 0); }, 0);
+  txt('rpay-total-badge', '₹' + _ruFmt(totalAmt));
+
+  var tbody = document.getElementById('rpay-tbody');
+  if (!tbody) return;
+
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="center" style="padding:32px;color:var(--muted);font-size:12px">' +
+      '<i class="fas fa-inbox" style="display:block;font-size:22px;margin-bottom:8px;opacity:.4"></i>' +
+      'No retail payments found' +
+      '</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = list.map(function (p) {
+    return '<tr>' +
+      '<td style="font-family:monospace;font-size:11px;color:var(--muted)">' + escHTML(p.paymentID) + '</td>' +
+      '<td style="font-weight:600;font-size:12px">' + escHTML(p.partyName || '--') + '</td>' +
+      '<td style="font-size:11px">' + escHTML(p.paymentDate) + '</td>' +
+      '<td><span class="badge badge-pending" style="background:#E8F0FE;font-size:10px">' + escHTML(p.mode || '--') + '</span></td>' +
+      '<td style="font-size:11px;color:var(--muted);font-family:monospace">' + escHTML(p.refNo || '--') + '</td>' +
+      '<td class="num" style="font-weight:700;color:var(--green)">₹' + _ruFmt(p.amount || 0) + '</td>' +
+      '<td style="font-size:10px;color:var(--muted)">' + escHTML(p.recordedBy || '--') + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+// ============================================================
+// Helper: refresh retail views when data changes
+// ============================================================
+
+function _refreshRetailViews() {
+  if (_activeView === 'retailDashboard') renderRetailDashboard();
+  if (_activeView === 'retailSales') renderRetailSales();
+  if (_activeView === 'retailCustomers') renderRetailCustomers();
+  if (_activeView === 'retailPayments') renderRetailPayments();
+}
+
+// Auto-hook: when _silentDataRefresh runs, also refresh retail views
+(function _hookRetailRefresh() {
+  if (typeof window._silentDataRefresh === 'function' && !window._silentDataRefresh._retailHooked) {
+    var _orig = window._silentDataRefresh;
+    window._silentDataRefresh = function () {
+      var res = _orig.apply(this, arguments);
+      // Retail views refresh after a short delay (data is already updated)
+      setTimeout(function () {
+        try { _refreshRetailViews(); } catch (e) {}
+      }, 150);
+      return res;
+    };
+    window._silentDataRefresh._retailHooked = true;
+  }
+})();
+
+// ── Close all open modals (prevents overlay stacking) ────────
+function _closeAllModals() {
+  ['rp-modal', 'fu-modal', 'party-modal', 'retail-stmt-modal',
+   'edit-inv-overlay', 'edit-pay-overlay', 'edit-party-overlay', 'edit-fu-overlay']
+  .forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.classList.remove('show');
+  });
+  document.body.style.overflow = '';
+}
+
+// Call this at the start of every modal open function
+
+
+// ============================================================
+// RETAIL FOLLOW-UPS — reuses FollowUps sheet (partyID/Code = RETAIL)
+// ============================================================
+var _rfuFilter = 'ALL';
+var _rfuPage = 1;
+var RFU_PER = 25;
+
+function _isRetailFollowUp(fu) {
+  if (!fu) return false;
+  return fu.partyID === 'RETAIL' || fu.partyCode === 'RETAIL' ||
+    (fu.partyID && String(fu.partyID).indexOf('RTL-') === 0);
+}
+
+function _retailCustomerPending(name) {
+  var target = (name || '').toLowerCase().trim();
+  var total = 0;
+  (_retailData.allRows || []).forEach(function(r) {
+    if ((r.customer || '').toLowerCase().trim() === target) {
+      total += parseFloat(r.pending) || 0;
+    }
+  });
+  return total;
+}
+
+function _retailCustomerNames() {
+  var map = {};
+  (_retailData.allRows || []).forEach(function(r) {
+    var n = (r.customer || '').trim();
+    if (n) map[n] = true;
+  });
+  // Also from RetailCustomers if in DB
+  if (DB && DB.retailCustomers) {
+    (DB.retailCustomers || []).forEach(function(c) {
+      if (c.name) map[c.name] = true;
+    });
+  }
+  return Object.keys(map).sort(function(a, b) { return a.localeCompare(b); });
+}
+
+/** Open follow-up modal in retail mode (customer search instead of party) */
+function openRetailFUModal(customerName) {
+  window._fuIsRetail = true;
+  openFUModal();
+
+  // Hide invoice picker (not relevant for aggregated retail)
+  var invEl = document.getElementById('fu-invoice');
+  if (invEl && invEl.closest) {
+    var g = invEl.closest('.form-group');
+    if (g) g.style.display = 'none';
+  }
+
+  // Build customer search SS
+  var names = _retailCustomerNames();
+  // If cache empty, try to load retail data first
+  if (!names.length) {
+    google.script.run
+      .withSuccessHandler(function(r) {
+        if (r && r.success) _retailData.allRows = r.rows || [];
+        _paintRetailFUCustomerSS(customerName);
+      })
+      .getRetailData();
+  } else {
+    _paintRetailFUCustomerSS(customerName);
+  }
+
+  // Prefill if name given
+  if (customerName) {
+    setTimeout(function() { _selectRetailFUCustomer(customerName); }, 150);
+  }
+}
+
+function _paintRetailFUCustomerSS(prefer) {
+  var opts = _retailCustomerNames().map(function(n) {
+    var pend = _retailCustomerPending(n);
+    return {
+      id: n,
+      name: n,
+      meta: pend > 0 ? ('Pending ₹' + _ruFmt(pend)) : 'Settled'
+    };
+  });
+  buildSS('fu-ss', opts, function(name) {
+    _selectRetailFUCustomer(name);
+  }, 'Search retail customer...');
+  if (prefer) _selectRetailFUCustomer(prefer);
+}
+
+function _selectRetailFUCustomer(name) {
+  if (!name) return;
+  window._fuIsRetail = true;
+  var pend = _retailCustomerPending(name);
+  window._fuOutstandingAmt = pend;
+  var s = function(id) { return document.getElementById(id); };
+  if (s('fu-party-id')) s('fu-party-id').value = 'RETAIL';
+  if (s('fu-party-code')) s('fu-party-code').value = 'RETAIL';
+  if (s('fu-party-name')) s('fu-party-name').value = name;
+  var inp = document.getElementById('fu-ss-inp');
+  if (inp) inp.value = name;
+  if (_ssState['fu-ss']) { _ssState['fu-ss'].value = name; _ssState['fu-ss'].text = name; }
+  // Show pending as hint in notes placeholder or promise default
+  var notes = document.getElementById('fu-notes');
+  if (notes && !notes.value) {
+    notes.placeholder = pend > 0
+      ? ('Pending ₹' + _ruFmt(pend) + ' — What was discussed?')
+      : 'What was discussed? What was the outcome?';
+  }
+}
+
+function setRFUFilter(el, f) {
+  _rfuFilter = f;
+  _rfuPage = 1;
+  document.querySelectorAll('[data-rfu-filter]').forEach(function(p) {
+    p.classList.toggle('active', p.getAttribute('data-rfu-filter') === f);
+  });
+  renderRetailFollowups();
+}
+
+function rfuPage(dir) {
+  _rfuPage = Math.max(1, _rfuPage + dir);
+  renderRetailFollowups();
+}
+
+function renderRetailFollowups() {
+  var tbody = document.getElementById('rfu-tbody');
+  if (!tbody) return;
+
+  var q = ((document.getElementById('rfu-search') || {}).value || '').toLowerCase();
+  var from = (document.getElementById('rfu-from') || {}).value || '';
+  var to = (document.getElementById('rfu-to') || {}).value || '';
+  var modeF = (document.getElementById('rfu-mode-filter') || {}).value || '';
+
+  var list = (DB.followups || []).filter(function(fu) {
+    if (!_isRetailFollowUp(fu)) return false;
+    if (q) {
+      var blob = ((fu.partyName || '') + ' ' + (fu.notes || '') + ' ' + (fu.contactPerson || '')).toLowerCase();
+      if (blob.indexOf(q) < 0) return false;
+    }
+    if (modeF && fu.mode !== modeF) return false;
+    if (from || to) {
+      var d = parseIST(fu.datetime) || parseIST(String(fu.datetime).split(' ')[0]);
+      if (from && d && d < new Date(from)) return false;
+      if (to && d && d > new Date(to + 'T23:59:59')) return false;
+    }
+    if (_rfuFilter === 'High' && fu.priority !== 'High') return false;
+    if (_rfuFilter === 'escalated' && fu.escalated !== 'Yes') return false;
+    if (_rfuFilter === 'promise-due') {
+      if (!fu.promiseDate || fu.promiseKept === 'Yes' || fu.promiseKept === 'Kept') return false;
+      var pd = parseIST(fu.promiseDate);
+      if (!pd || pd > new Date()) return false;
+    }
+    return true;
+  });
+
+  // Newest first
+  list.sort(function(a, b) {
+    var da = parseIST(a.datetime) || parseIST(a.loggedOn) || new Date(0);
+    var db = parseIST(b.datetime) || parseIST(b.loggedOn) || new Date(0);
+    return db - da;
+  });
+
+  var total = list.length;
+  var totalPages = Math.max(1, Math.ceil(total / RFU_PER));
+  if (_rfuPage > totalPages) _rfuPage = totalPages;
+  var page = list.slice((_rfuPage - 1) * RFU_PER, _rfuPage * RFU_PER);
+
+  txt('rfu-sub', total + ' retail follow-ups');
+  txt('rfu-info', total ? (((_rfuPage - 1) * RFU_PER + 1) + '-' + Math.min(_rfuPage * RFU_PER, total) + ' of ' + total) : '0 follow-ups');
+  var prev = document.getElementById('rfu-prev'), next = document.getElementById('rfu-next'), pg = document.getElementById('rfu-page');
+  if (prev) prev.disabled = _rfuPage <= 1;
+  if (next) next.disabled = _rfuPage >= totalPages;
+  if (pg) pg.textContent = _rfuPage + ' / ' + totalPages;
+
+  if (!page.length) {
+    tbody.innerHTML = emptyRow(10, 'Koi retail follow-up nahi. “Log Follow-up” se pehla entry banayein.');
+    return;
+  }
+
+  tbody.innerHTML = page.map(function(fu) {
+    var priColor = fu.priority === 'High' ? '#EA4335' : (fu.priority === 'Low' ? '#94A3B8' : '#F9AB00');
+    var kept = (fu.promiseKept || 'Pending');
+    var keptColor = kept === 'Yes' || kept === 'Kept' ? 'var(--green)' : (kept === 'No' || kept === 'Broken' ? 'var(--red)' : 'var(--muted)');
+    var notesShort = (fu.notes || '').length > 60 ? (fu.notes || '').slice(0, 60) + '…' : (fu.notes || '');
+    return '<tr>' +
+      '<td style="font-size:11px;white-space:nowrap">' + escHTML(fu.datetime || fu.loggedOn || '') + '</td>' +
+      '<td style="font-weight:600;font-size:12px">' + escHTML(fu.partyName || '') + '</td>' +
+      '<td style="font-size:11px">' + escHTML(fu.mode || '') + '</td>' +
+      '<td style="font-size:11px;color:var(--muted)">' + escHTML(fu.contactPerson || '—') + '</td>' +
+      '<td style="font-size:11px;max-width:220px" title="' + escHTML(fu.notes || '') + '">' + escHTML(notesShort) + '</td>' +
+      '<td class="num" style="font-weight:600">' + (fu.promiseAmt ? ('₹' + _ruFmt(fu.promiseAmt)) : '—') + '</td>' +
+      '<td style="font-size:11px">' + escHTML(fu.promiseDate || '—') + '</td>' +
+      '<td><span style="font-size:10px;font-weight:700;color:' + priColor + '">' + escHTML(fu.priority || 'Medium') + '</span></td>' +
+      '<td style="font-size:11px;font-weight:600;color:' + keptColor + '">' + escHTML(kept) + '</td>' +
+      '<td style="white-space:nowrap">' +
+        '<button type="button" class="act-btn ab-pay" title="Record Payment" onclick="_rptQuickPay(\'' + escQ(fu.partyName || '') + '\')"><i class="fas fa-indian-rupee-sign"></i></button> ' +
+        '<button type="button" class="act-btn ab-fu" title="Log another" onclick="openRetailFUModal(\'' + escQ(fu.partyName || '') + '\')"><i class="fas fa-phone-alt"></i></button>' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+window.openRetailFUModal = openRetailFUModal;
+window.renderRetailFollowups = renderRetailFollowups;
+window.setRFUFilter = setRFUFilter;
+window.rfuPage = rfuPage;
+
+
+
+// ── Retail Promise Tracker ──────────────────────────────────
+var _rptFilter = 'ALL';
+
+function setRPTFilter(el, f) {
+  _rptFilter = f;
+  document.querySelectorAll('[data-rpt-filter]').forEach(function(p) {
+    p.classList.toggle('active', p.getAttribute('data-rpt-filter') === f);
+  });
+  renderRetailPromises();
+}
+
+function renderRetailPromises() {
+  var tbody = document.getElementById('rpt-tbody');
+  if (!tbody) return;
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+
+  var list = (DB.followups || []).filter(function(f) {
+    if (!_isRetailFollowUp(f)) return false;
+    if (!f.promiseAmt && !f.promiseDate) return false;
+    if (_rptFilter === 'ALL') return true;
+    if (_rptFilter === 'overdue-promise') {
+      var pd = f.promiseDate ? parseIST(f.promiseDate) : null;
+      return pd && pd < today && (f.promiseKept === 'Pending' || !f.promiseKept);
+    }
+    return (f.promiseKept || 'Pending') === _rptFilter;
+  }).sort(function(a, b) {
+    return String(a.promiseDate || '').localeCompare(String(b.promiseDate || ''));
+  });
+
+  var kept = 0, broken = 0, pending = 0, overdue = 0;
+  list.forEach(function(f) {
+    var k = f.promiseKept || 'Pending';
+    if (k === 'Yes' || k === 'Kept') kept++;
+    else if (k === 'No' || k === 'Broken') broken++;
+    else pending++;
+    var pd = f.promiseDate ? parseIST(f.promiseDate) : null;
+    if (pd && pd < today && (k === 'Pending' || !f.promiseKept)) overdue++;
+  });
+  txt('rpt-kept', kept);
+  txt('rpt-broken', broken);
+  txt('rpt-pending', pending);
+  txt('rpt-overdue', overdue);
+
+  if (!list.length) {
+    tbody.innerHTML = emptyRow(7, 'Koi retail promise nahi. Follow-up mein promise amount/date daalein.');
+    return;
+  }
+
+  tbody.innerHTML = list.map(function(f) {
+    var pd = f.promiseDate ? parseIST(f.promiseDate) : null;
+    var k = f.promiseKept || 'Pending';
+    var isOverdue = pd && pd < today && (k === 'Pending');
+    var pkColor = (k === 'Yes' || k === 'Kept') ? 'var(--green)' : (k === 'No' || k === 'Broken') ? 'var(--red)' : isOverdue ? 'var(--red)' : 'var(--amber)';
+    var notesShort = (f.notes || '').length > 50 ? (f.notes || '').slice(0, 50) + '…' : (f.notes || '—');
+    return '<tr style="' + (isOverdue ? 'background:#FCE8E6' : '') + '">' +
+      '<td style="font-weight:600;font-size:12px">' + escHTML(f.partyName || '') + '</td>' +
+      '<td style="font-size:11px">' + escHTML(String(f.datetime || '').split(' ')[0] || '') + '</td>' +
+      '<td class="num" style="font-weight:700">' + (f.promiseAmt ? ('₹' + _ruFmt(f.promiseAmt)) : '—') + '</td>' +
+      '<td style="font-size:11px">' + escHTML(f.promiseDate || '—') + (isOverdue ? ' <span style="color:var(--red);font-weight:700;font-size:10px">OVERDUE</span>' : '') + '</td>' +
+      '<td style="font-weight:600;color:' + pkColor + ';font-size:11px">' + escHTML(k) + '</td>' +
+      '<td style="font-size:11px;max-width:180px" title="' + escHTML(f.notes || '') + '">' + escHTML(notesShort) + '</td>' +
+      '<td style="white-space:nowrap">' +
+        (k === 'Pending' ? (
+          '<button type="button" class="act-btn" style="background:#E6F4EA;color:var(--green)" onclick="updatePromise(\'' + escQ(f.followUpID) + '\',\'Yes\')" title="Kept"><i class="fas fa-check"></i></button> ' +
+          '<button type="button" class="act-btn" style="background:#FCE8E6;color:var(--red)" onclick="updatePromise(\'' + escQ(f.followUpID) + '\',\'No\')" title="Broken"><i class="fas fa-times"></i></button> '
+        ) : '') +
+        '<button type="button" class="act-btn ab-pay" onclick="_rptQuickPay(\'' + escQ(f.partyName || '') + '\')" title="Pay"><i class="fas fa-indian-rupee-sign"></i></button>' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+// ── Retail Escalations ──────────────────────────────────────
+function renderRetailEscalations() {
+  var tbody = document.getElementById('resc-tbody');
+  if (!tbody) return;
+
+  var list = (DB.followups || []).filter(function(f) {
+    return _isRetailFollowUp(f) && f.escalated === 'Yes';
+  }).sort(function(a, b) {
+    return String(b.datetime || '').localeCompare(String(a.datetime || ''));
+  });
+
+  var resolved = list.filter(function(f) {
+    var k = f.promiseKept || '';
+    return k === 'Yes' || k === 'Kept';
+  }).length;
+  txt('resc-total', list.length);
+  txt('resc-resolved', resolved);
+  txt('resc-open', list.length - resolved);
+
+  if (!list.length) {
+    tbody.innerHTML = emptyRow(8, 'Koi retail escalation nahi.');
+    return;
+  }
+
+  tbody.innerHTML = list.map(function(f) {
+    var priColor = f.priority === 'High' ? '#EA4335' : '#F9AB00';
+    var notesShort = (f.notes || '').length > 50 ? (f.notes || '').slice(0, 50) + '…' : (f.notes || '—');
+    return '<tr>' +
+      '<td style="font-weight:600;font-size:12px">' + escHTML(f.partyName || '') + '</td>' +
+      '<td style="font-size:11px">' + escHTML(f.datetime || f.loggedOn || '') + '</td>' +
+      '<td style="font-size:12px;font-weight:600">' + escHTML(f.escalatedTo || '—') + '</td>' +
+      '<td class="num" style="color:var(--red);font-weight:700">₹' + _ruFmt(f.outstandingAmt || 0) + '</td>' +
+      '<td style="font-size:11px;max-width:180px" title="' + escHTML(f.notes || '') + '">' + escHTML(notesShort) + '</td>' +
+      '<td class="num">' + (f.promiseAmt ? ('₹' + _ruFmt(f.promiseAmt)) : '—') + '</td>' +
+      '<td style="font-size:10px;font-weight:700;color:' + priColor + '">' + escHTML(f.priority || 'Medium') + '</td>' +
+      '<td style="white-space:nowrap">' +
+        '<button type="button" class="act-btn ab-pay" onclick="_rptQuickPay(\'' + escQ(f.partyName || '') + '\')"><i class="fas fa-indian-rupee-sign"></i></button> ' +
+        '<button type="button" class="act-btn ab-fu" onclick="openRetailFUModal(\'' + escQ(f.partyName || '') + '\')"><i class="fas fa-phone-alt"></i></button>' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+/** Paint recent retail follow-ups on retail dashboard */
+function _paintRetailDashboardFollowups() {
+  var el = document.getElementById('rd-fu-list');
+  if (!el) return;
+  var list = (DB.followups || []).filter(_isRetailFollowUp)
+    .sort(function(a, b) { return String(b.datetime || '').localeCompare(String(a.datetime || '')); })
+    .slice(0, 8);
+
+  if (!list.length) {
+    el.innerHTML = '<div style="text-align:center;padding:16px;color:var(--muted);font-size:12px">Abhi koi follow-up nahi.<br><button class="btn btn-sm btn-amber" style="margin-top:8px" onclick="openRetailFUModal()"><i class="fas fa-phone-alt"></i> Log first</button></div>';
+    return;
+  }
+
+  el.innerHTML = list.map(function(f) {
+    var modeBg = f.mode === 'WhatsApp' ? '#E6F4EA' : f.mode === 'Phone Call' ? '#E8F0FE' : '#F1F5F9';
+    return '<div style="display:flex;justify-content:space-between;gap:8px;padding:8px 4px;border-bottom:1px solid #F1F5F9">' +
+      '<div style="min-width:0;flex:1">' +
+        '<div style="font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHTML(f.partyName || '') + '</div>' +
+        '<div style="font-size:10px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHTML((f.notes || '').slice(0, 60)) + '</div>' +
+      '</div>' +
+      '<div style="text-align:right;flex-shrink:0">' +
+        '<span style="background:' + modeBg + ';font-size:9px;padding:2px 6px;border-radius:8px;font-weight:600">' + escHTML(f.mode || '') + '</span>' +
+        '<div style="font-size:9px;color:var(--muted);margin-top:3px">' + escHTML(String(f.datetime || '').split(' ')[0] || '') + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+window.renderRetailPromises = renderRetailPromises;
+window.renderRetailEscalations = renderRetailEscalations;
+window.setRPTFilter = setRPTFilter;
