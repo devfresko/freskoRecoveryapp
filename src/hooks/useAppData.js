@@ -3,16 +3,20 @@ import { gas } from '../lib/gasClient'
 import { qk } from '../api/queries'
 
 export function useAppData(userName) {
+  const key = (userName || '').trim() || 'anon'
+
   return useQuery({
-    queryKey: qk.all(userName || 'anon'),
+    queryKey: qk.all(key),
     queryFn: async () => {
-      const res = await gas.getAllData(userName || '', '0')
+      const res = await gas.getAllData(key === 'anon' ? '' : key, '0')
       if (!res?.success) throw new Error(res?.error || 'Load failed')
       return res
     },
-    enabled: !!userName,
+    // pehle userName empty hone pe bilkul band ho jata tha
+    enabled: true,
     staleTime: 5 * 60 * 1000,
     placeholderData: (prev) => prev,
+    retry: 2,
   })
 }
 
