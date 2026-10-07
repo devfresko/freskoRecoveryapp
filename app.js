@@ -3315,14 +3315,15 @@ function shortPage(d) {
         let validCnt = 0, skipCnt = 0;
 
         const existingNos = new Set((DB.invoices || []).map(i => (i.invoiceNo || '').toLowerCase()));
+        const _pnorm = s => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
         const partyByName = {};
-        (DB.parties || []).forEach(p => { if (p.name) partyByName[p.name.toLowerCase()] = p; });
+        (DB.parties || []).forEach(p => { if (p.name) partyByName[_pnorm(p.name)] = p; });
 
         rows.forEach(r => {
           const nameRaw = r.partyName || '';
-          let party = partyByName[nameRaw.toLowerCase()] || null;
-          if (!party && nameRaw.length >= 4) {
-            const slug = nameRaw.toLowerCase().slice(0, 8);
+          let party = partyByName[_pnorm(nameRaw)] || null;
+          if (!party && _pnorm(nameRaw).length >= 4) {
+            const slug = _pnorm(nameRaw).slice(0, 8);
             const key = Object.keys(partyByName).find(k => k.startsWith(slug));
             if (key) party = partyByName[key];
           }
@@ -3498,7 +3499,8 @@ function shortPage(d) {
             const fc = (...names) => {
               for (const n of names) {
                 const slug = n.toLowerCase().replace(/[^a-z0-9]/g, '');
-                const i = headers.findIndex(h => h.replace(/[^a-z0-9]/g, '').includes(slug));
+                let i = headers.findIndex(h => h.replace(/[^a-z0-9]/g, '') === slug);
+                if (i === -1) i = headers.findIndex(h => h.replace(/[^a-z0-9]/g, '').includes(slug));
                 if (i !== -1) return i;
               }
               return -1;
@@ -3508,7 +3510,7 @@ function shortPage(d) {
             const colBillNo = fc('billno', 'bill_no', 'bill no', 'invoiceno', 'inv_no');
             const colAmt = fc('net_value', 'netvalue', 'net value', 'net');
 
-            const colName = fc('name', 'partyname', 'party_name', 'party');
+            const colName = fc('partyname', 'party_name', 'name', 'party');
             const colCode = fc('party_code', 'partycode', 'code');
             const colCity = fc('city');
             const colDesc = fc('description', 'desc', 'particulars', 'item');
@@ -3550,11 +3552,12 @@ function shortPage(d) {
             }
 
             const existingNos = new Set((DB.invoices || []).map(i => (i.invoiceNo || '').toLowerCase()));
+            const _pnorm = s => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
             const partyByCode = {};
             const partyByName = {};
             (DB.parties || []).forEach(p => {
               if (p.partyCode) partyByCode[p.partyCode.toLowerCase()] = p;
-              if (p.name) partyByName[p.name.toLowerCase()] = p;
+              if (p.name) partyByName[_pnorm(p.name)] = p;
             });
 
             _csvParsed = [];
@@ -3582,9 +3585,9 @@ function shortPage(d) {
               let party = null;
               if (codeRaw) party = partyByCode[codeRaw.toLowerCase()] || null;
               if (!party && nameRaw) {
-                party = partyByName[nameRaw.toLowerCase()] || null;
-                if (!party && nameRaw.length >= 4) {
-                  const slug = nameRaw.toLowerCase().slice(0, 8);
+                party = partyByName[_pnorm(nameRaw)] || null;
+                if (!party && _pnorm(nameRaw).length >= 4) {
+                  const slug = _pnorm(nameRaw).slice(0, 8);
                   const key = Object.keys(partyByName).find(k => k.startsWith(slug));
                   if (key) party = partyByName[key];
                 }
