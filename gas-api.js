@@ -16,7 +16,7 @@
 // Web App URL (Sheet menu → "Payment Follow-up" → "Show API URL (for app.js)").
 // ============================================================
 
-var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz8UTtYU-aOGSVtkYtG3Fbl9vTRMgTOQr56GW3QYtE9KJ-iwNGQuQZuj8rnsb619nU/exec';
+// GAS_API_URL removed: the browser now calls /api/rpc (Vercel). The Apps Script URL lives only in the GAS_URL env var.
 
 (function () {
   var _cbIdx = 0;
@@ -37,22 +37,17 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz8UTtYU-aOGSVtkYtG3F
     bulkUploadInvoices:1     // duplicate invoice nos skipped server-side
   };
 
+  // Same-origin POST to Vercel /api/rpc. The server adds the secret and talks to
+  // Apps Script, so no secret or script.google.com URL ever reaches the browser.
+  // (Function name kept as _rawJsonpCall so the chunk helpers below stay unchanged.)
   function _rawJsonpCall(fnName, args, onSuccess, onFailure, _attempt) {
     var attempt = _attempt || 1;
     var maxAttempts = 3;
-    var cbName = '_gascb' + (++_cbIdx);
-    var timeoutId;
-
-    function cleanup() {
-      clearTimeout(timeoutId);
-      try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
-      var tag = document.getElementById('_s_' + cbName);
-      if (tag && tag.parentNode) tag.parentNode.removeChild(tag);
-    }
+    var ctl = new AbortController();
+    var timeoutId = setTimeout(function () { ctl.abort(); }, JSONP_TIMEOUT_MS);
 
     function fail(err) {
-      cleanup();
-      // Auto-retry on network/timeout (Apps Script cold start is common)
+      clearTimeout(timeoutId);
       if (attempt < maxAttempts && RETRY_SAFE[fnName]) {
         setTimeout(function () {
           _rawJsonpCall(fnName, args, onSuccess, onFailure, attempt + 1);
@@ -65,33 +60,27 @@ var GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz8UTtYU-aOGSVtkYtG3F
       if (onFailure) onFailure(err);
     }
 
-    window[cbName] = function (result) {
-      cleanup();
-      if (onSuccess) onSuccess(result);
-    };
-
-    timeoutId = setTimeout(function () {
-      fail({ message: 'Request timed out (try ' + attempt + '/' + maxAttempts + '). Check connection.' });
-    }, JSONP_TIMEOUT_MS);
-
-    var url = GAS_API_URL +
-      '?callback=' + encodeURIComponent(cbName) +
-      '&fn=' + encodeURIComponent(fnName) +
-      '&args=' + encodeURIComponent(JSON.stringify(args || []));
-
-    // Guard: URL too long → fail early with clear message
-    if (url.length > 18000) {
-      fail({ message: 'Request too large for network. Try fewer rows or refresh and retry.' });
-      return;
-    }
-
-    var s = document.createElement('script');
-    s.id = '_s_' + cbName;
-    s.src = url;
-    s.onerror = function () {
-      fail({ message: 'Network error while reaching the server.' });
-    };
-    document.head.appendChild(s);
+    fetch('/api/rpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fn: fnName, args: args || [] }),
+      cache: 'no-store',
+      signal: ctl.signal
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        var data;
+        try { data = JSON.parse(text); }
+        catch (e) { throw new Error('Server returned a non-JSON response (HTTP ' + res.status + ')'); }
+        return data;
+      });
+    }).then(function (data) {
+      clearTimeout(timeoutId);
+      if (onSuccess) onSuccess(data);
+    }).catch(function (e) {
+      fail({ message: (e && e.name === 'AbortError')
+        ? 'Request timed out (try ' + attempt + '/' + maxAttempts + '). Check connection.'
+        : ((e && e.message) || 'Network error while reaching the server.') });
+    });
   }
 
   // bulkUploadInvoices(rows, batchLabel, userName) can carry a large `rows`
