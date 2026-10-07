@@ -2,4 +2,9 @@ node_modules
 dist
 .env
 .env.local
+.vercel
 .DS_Store
+# Service-account keys must NEVER be committed
+*-firebase-adminsdk-*.json
+recoveryapp-*.json
+serviceAccount*.json
