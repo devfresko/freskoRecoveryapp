@@ -5806,6 +5806,60 @@ function _clearFIFOBreakdown() {
   if (bd) bd.remove();
 }
 
+// ============================================================
+// SUPPLY — live Amount / Unallocated summary (same behaviour as Retail form)
+// Cash + TDS + Discount  vs  pending of checked invoices (or all pending if none checked)
+// ============================================================
+function _rpFmt(n) { return Math.round(n || 0).toLocaleString('en-IN'); }
+
+function _rpUpdateAmtSummary() {
+  var all = Array.from(document.querySelectorAll('.rp-inv-check'));
+  var box = document.getElementById('rp-amt-summary');
+  var hint = document.getElementById('rp-amount-hint');
+  if (!box) return;
+  if (!all.length) { box.style.display = 'none'; if (hint) hint.textContent = ''; return; }
+  box.style.display = 'block';
+
+  var sel = all.filter(function (c) { return c.checked; });
+  var base = sel.length ? sel : all;
+  var totalPending = base.reduce(function (s, c) { return s + (parseFloat(c.dataset.expected) || 0); }, 0);
+
+  var g = function (id) { var el = document.getElementById(id); return el ? (parseFloat(el.value) || 0) : 0; };
+  var cash = g('rp-amount');
+  var avail = cash + g('rp-tds') + g('rp-disc');
+
+  var allocated = Math.min(avail, totalPending);
+  var afterPay = Math.max(0, totalPending - allocated);
+  var unalloc = Math.max(0, avail - totalPending);
+
+  var set = function (id, v) { var el = document.getElementById(id); if (el) el.textContent = v; };
+  set('rp-total-pending', '₹' + _rpFmt(totalPending));
+  set('rp-paying-now', '₹' + _rpFmt(allocated));
+  set('rp-after-pay', '₹' + _rpFmt(afterPay));
+
+  var unRow = document.getElementById('rp-unalloc-row');
+  if (unRow) {
+    if (unalloc > 0.5) { unRow.style.display = 'block'; set('rp-unalloc-amt', '₹' + _rpFmt(unalloc)); }
+    else unRow.style.display = 'none';
+  }
+
+  if (hint) {
+    if (avail <= 0) {
+      hint.textContent = totalPending > 0 ? ('Full pending: ₹' + _rpFmt(totalPending)) : '';
+      hint.style.color = 'var(--muted)';
+    } else if (unalloc > 0.5) {
+      hint.textContent = '₹' + _rpFmt(unalloc) + ' extra — koi invoice nahi bachega iske liye';
+      hint.style.color = '#8a4200';
+    } else if (afterPay > 0.5) {
+      hint.textContent = 'Baad mein baki rahega: ₹' + _rpFmt(afterPay);
+      hint.style.color = '#64748B';
+    } else {
+      hint.textContent = 'Poora pending clear ho jayega';
+      hint.style.color = '#137333';
+    }
+  }
+}
+
 // Hook into amount / TDS / Discount inputs — auto-recalc FIFO when values change
 (function _hookFIFOInputs() {
   setInterval(function() {
@@ -5818,9 +5872,20 @@ function _clearFIFOBreakdown() {
       el._fifoHooked = true;
       el.addEventListener('input', function() {
         var tgl = document.getElementById('rp-fifo-toggle');
+        // Retail jaisa: invoice manually select nahi kiya ho to amount likhte hi FIFO auto-on
+        if (id === 'rp-amount' && tgl && !tgl.checked &&
+            (parseFloat(el.value) || 0) > 0 &&
+            document.querySelectorAll('.rp-inv-check').length &&
+            !document.querySelector('.rp-inv-check:checked')) {
+          tgl.checked = true;
+          var hintEl = document.getElementById('rp-fifo-hint');
+          if (hintEl) hintEl.style.display = 'block';
+        }
         if (tgl && tgl.checked) _applyFIFOAllocation();
+        _rpUpdateAmtSummary();
       });
     });
+    try { _rpUpdateAmtSummary(); } catch (e) {}
 
     // Show/hide FIFO box based on whether party has pending invoices
     var fifoBox = document.getElementById('rp-fifo-box');
