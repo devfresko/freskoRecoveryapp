@@ -3294,9 +3294,10 @@ function shortPage(d) {
                 else if(i+1<strs.length){const m2=strs[i+1].match(/^([\d,]+\.\d{2})$/);if(m2)netAmt=parseFloat(m2[1].replace(/,/g,''));}
               }
             }
-            if(!netAmt&&billValue)netAmt=billValue;
-            if(!invNo||!invDate||!partyName||!netAmt){badPages.push(p);continue;}
-            extracted.push({invoiceNo:invNo,invoiceDate:invDate,partyName:partyName.slice(0,120),billValue:billValue||netAmt,marketChg:marketChg||0,netAmt:netAmt,page:p});
+            if(netAmt==null&&billValue!=null)netAmt=billValue;   // 0.00 is a valid amount (zero-value / sample invoices)
+            if(!invNo||!invDate||!partyName||netAmt==null){badPages.push(p);continue;}
+            if(netAmt===0){billValue=0;marketChg=0;}              // on 0.00 invoices the 2nd number is the quantity, not Market Chg
+            extracted.push({invoiceNo:invNo,invoiceDate:invDate,partyName:partyName.slice(0,120),billValue:(billValue!=null?billValue:netAmt),marketChg:marketChg||0,netAmt:netAmt,page:p});
           }
           if(dz){dz.style.opacity='';dz.style.pointerEvents='';}
           if(prog)prog.style.display='none';
@@ -3346,7 +3347,7 @@ function shortPage(d) {
           const isDup = r.invoiceNo && existingNos.has(r.invoiceNo.toLowerCase());
           let status = 'ok';
           if (!party) status = 'warn';
-          if (isDup || !r.invoiceNo || !r.netAmt) status = 'skip';
+          if (isDup || !r.invoiceNo || r.netAmt == null) status = 'skip';
           status === 'skip' ? skipCnt++ : validCnt++;
 
           const displayName = party ? party.name : (nameRaw || '?');
@@ -3362,7 +3363,7 @@ function shortPage(d) {
               dueDate: dueDateStr,
               dueDays,
               slabPct,
-              billValue: r.billValue || r.netAmt,
+              billValue: (r.billValue != null ? r.billValue : r.netAmt),
               cgst: 0,
               sgst: 0,
               igst: 0,
@@ -3730,7 +3731,7 @@ function shortPage(d) {
         if (!_csvParsed.length) { showCSVStatus('warn', 'No valid rows to upload.'); return; }
 
         var total  = _csvParsed.length;
-        var chunks = Math.ceil(total / 10);
+        var chunks = Math.ceil(total / 500);
         var btn    = document.getElementById('csv-upload-btn');
         btn.disabled = true;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
