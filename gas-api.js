@@ -20,10 +20,10 @@
 
 (function () {
   var _cbIdx = 0;
-  var JSONP_TIMEOUT_MS = 45000;
+  var JSONP_TIMEOUT_MS = 75000;
   // Keep each JSONP request's query string comfortably under safe URL-length
   // limits. Only matters for calls with big array payloads (bulk upload).
-  var MAX_ARGS_JSON_LEN = 6000;
+  var MAX_ARGS_JSON_LEN = 1500000;
 
   // Auto-retry is ONLY safe for read-only / idempotent calls. Retrying a write such
   // as recordPayment / createInvoice / saveFollowUp / sendWhatsApp* after a timeout can
@@ -89,7 +89,7 @@
   // merges the results back into the single result shape the app expects:
   // { success, rowsAdded, skipped, batch, msg, errors }.
   // Rows per chunk — 10 rows keeps URL under 7500 chars (GAS safe limit)
-  var ROWS_PER_CHUNK = 10;
+  var ROWS_PER_CHUNK = 500;
 
   function _chunkedBulkUpload(args, onSuccess, onFailure) {
     var rows      = args[0] || [];
@@ -138,7 +138,7 @@
   }
 
   // Retail PDF rows can be large — chunk checkRetailDuplicates + commitRetailData
-  var RETAIL_ROWS_PER_CHUNK = 8;
+  var RETAIL_ROWS_PER_CHUNK = 2000;
 
   function _chunkedRetailCheck(args, onSuccess, onFailure) {
     var rows = args[0] || [];
@@ -193,7 +193,7 @@
   // Server (commitRetailData) only reads Sale_Date, Customer_Name, Qty, Amount
   // (+ dateRange, which falls back to meta.dateRange). Sending only those keeps
   // each row ~4x smaller, so one JSONP call carries ~40-50 rows instead of 8.
-  var RETAIL_MAX_ENC_LEN = 6500; // max encoded `args` length per request
+  var RETAIL_MAX_ENC_LEN = 300000; // max encoded `args` length per request
 
   function _slimRetailRow(r, dr) {
     var o = {
@@ -226,7 +226,7 @@
     }
     var slim = rows.map(function (r) { return _slimRetailRow(r, meta.dateRange); });
     var metaLen = encodeURIComponent(JSON.stringify(meta)).length;
-    var chunks = _chunkByEncodedLen(slim, Math.max(2500, RETAIL_MAX_ENC_LEN - metaLen));
+    var chunks = _chunkByEncodedLen(slim, Math.max(20000, RETAIL_MAX_ENC_LEN - metaLen));
     var merged = { success: true, written: 0, skipped: meta.dupCount || 0 };
     var i = 0;
     function next() {
