@@ -307,7 +307,13 @@ __m.rpc = (() => {
     const force = fn !== 'getAllData' || !sinceTs || String(sinceTs) === '0' || String(sinceTs) === 'force';
 
     if (force) {                                                    // explicit refresh / retail reads must be fresh
-      if (!(await waitFresh())) return undefined;
+      // A write/rebuild is pending -> do NOT wait for the rebuild (that was the delay after every form).
+      // Serve live from Apps Script now (always fresh); the rebuild continues in the background.
+      const st = await store.getSyncState();
+      if (store.isBusy(st)) {
+        if (st.dirty && !st.syncing) runSync().catch(() => {});   // self-heal
+        return undefined;
+      }
       meta = await store.getMeta();
       if (!meta) return undefined;
     }
