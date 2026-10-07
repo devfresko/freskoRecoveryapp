@@ -39,15 +39,26 @@ __m.gas = (() => {
     opts = opts || {};
     const base = process.env.GAS_URL;
     if (!base) throw new Error('GAS_URL env var is not set');
-    const u = new URL(base);
-    u.searchParams.set('fn', fn);
-    u.searchParams.set('args', JSON.stringify(args || []));
-    if (process.env.GAS_SECRET) u.searchParams.set('secret', process.env.GAS_SECRET);
+    const argsJson = JSON.stringify(args || []);
 
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), opts.timeoutMs || 55000);
     try {
-      const res = await fetch(u.toString(), { redirect: 'follow', signal: ctl.signal });
+      let res;
+      if (argsJson.length > 3000) {
+        // Big payload (bulk uploads): GET URLs are length-limited, so use POST -> Apps Script doPost()
+        res = await fetch(base, {
+          method: 'POST', redirect: 'follow', signal: ctl.signal,
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ fn: fn, args: args || [], secret: process.env.GAS_SECRET || '' })
+        });
+      } else {
+        const u = new URL(base);
+        u.searchParams.set('fn', fn);
+        u.searchParams.set('args', argsJson);
+        if (process.env.GAS_SECRET) u.searchParams.set('secret', process.env.GAS_SECRET);
+        res = await fetch(u.toString(), { redirect: 'follow', signal: ctl.signal });
+      }
       const text = await res.text();
       try { return JSON.parse(text); }
       catch (e) { throw new Error('Apps Script returned a non-JSON response (HTTP ' + res.status + ')'); }
