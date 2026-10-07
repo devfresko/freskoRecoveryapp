@@ -13,6 +13,9 @@ module.exports = async (req, res) => {
     const r = await runSync();
     res.status(200).json({ ok: true, result: r });
   } catch (e) {
-    res.status(200).json({ ok: false, error: e.message });
+    res.status(200).json({
+      ok: false, error: e.message, stage: e.stage || '',
+      at: String(e.stack || '').split('\n').slice(1, 4).map(function (x) { return x.trim(); }).join(' | ')
+    });
   }
 };
