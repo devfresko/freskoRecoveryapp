@@ -1,4 +1,4 @@
-var CACHE = 'fresko-payments-v7';   // ← v4 se v5 bump kiya
+var CACHE = 'fresko-payments-v8';
 var SHELL = ['./', './index.html', './app.js', './gas-api.js', './manifest.json'];
 
 self.addEventListener('install', function (e) {
@@ -19,6 +19,8 @@ self.addEventListener('fetch', function (e) {
   var url = e.request.url;
   // Never cache: Apps Script API + external CDNs
   if (url.indexOf('script.google.com') !== -1) return;
+  if (e.request.method !== 'GET') return;                 // never touch POST (/api/rpc)
+  if (url.indexOf('/api/') !== -1) return;                // never cache API calls
   if (url.indexOf(self.location.origin) !== 0) return;
 
   // App shell: stale-while-revalidate (instant load + fresh in background)
