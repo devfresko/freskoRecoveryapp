@@ -179,19 +179,26 @@ __m.sync = (() => {
   }
 
   async function runSync() {
-    if (!(await acquire())) return { ran: false, queued: true };
+    let stage = 'acquire-lock (Firestore)';
+    let acquired = false;
     let loops = 0;
     try {
+      if (!(await acquire())) return { ran: false, queued: true };
+      acquired = true;
       for (;;) {
         loops++;
+        stage = 'apps-script getSnapshot';
         const snap = await callGas('getSnapshot', [], { timeoutMs: 55000 });
+        stage = 'check apps-script reply';
         if (!snap || snap.success === false || !snap.all || snap.all.success === false) {
-          throw new Error((snap && (snap.error || (snap.all && snap.all.error))) || 'getSnapshot failed');
+          throw new Error('Apps Script said: ' + ((snap && (snap.error || (snap.all && snap.all.error))) || 'getSnapshot failed'));
         }
+        stage = 'save snapshot (Firestore)';
         await store.saveSnapshot({
           all: snap.all, retailData: snap.retailData, retailPending: snap.retailPending,
           retailCustomers: snap.retailCustomers, users: snap.users || {}
         });
+        stage = 'release-lock (Firestore)';
         if (!(await release())) break;
         if (loops >= MAX_LOOPS) {      // still dirty: leave the flag set; self-heal kicks in on next read
           await store.metaRef('sync').set({ syncing: false, dirty: true }, { merge: true });
@@ -200,7 +207,10 @@ __m.sync = (() => {
       }
       return { ran: true, loops: loops };
     } catch (e) {
-      await store.metaRef('sync').set({ syncing: false, lastError: String(e.message || e) }, { merge: true }).catch(() => {});
+      e.stage = stage;
+      if (acquired) {
+        await store.metaRef('sync').set({ syncing: false, lastError: stage + ': ' + String(e.message || e) }, { merge: true }).catch(() => {});
+      }
       throw e;
     }
   }
