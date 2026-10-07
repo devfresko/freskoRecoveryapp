@@ -6355,7 +6355,7 @@ function _paintRetailCustomerSS(customers, prefer) {
     _showRetailPrefillBadge(match || { name: custName, pending: 0, entries: 0 });
     // Reset amount for NEW customer — avoid stale unallocated from previous
     var amtEl = document.getElementById('rpt-amount');
-    if (amtEl) { amtEl.value = match ? (Math.round(match.pending * 100) / 100) : ''; delete amtEl.dataset.userEdited; }
+    if (amtEl) { amtEl.value = ''; delete amtEl.dataset.userEdited; }   // amount is filled from the entries list below (single source of truth)
     _rptEntries = [];
     _loadRetailEntriesLocalOrRemote(custName);
   }, 'Search customer...');
@@ -6373,10 +6373,9 @@ function _paintRetailCustomerSS(customers, prefer) {
       var inp = document.getElementById('rpt-retail-cust-ss-inp');
       if (inp) inp.value = match.name;
       _showRetailPrefillBadge(match);
-      _loadRetailEntries(match.name);
-      // Prefill amount with full pending (user can edit)
-      var amtEl = document.getElementById('rpt-amount');
-      if (amtEl && !amtEl.value) amtEl.value = Math.round(match.pending * 100) / 100;
+      var amtEl0 = document.getElementById('rpt-amount');
+      if (amtEl0) { amtEl0.value = ''; delete amtEl0.dataset.userEdited; }   // clear stale amount
+      _loadRetailEntries(match.name);   // amount is filled from the entries list itself
     }
   }
 }
@@ -6576,6 +6575,30 @@ function _rptSubmit() {
   var amt = parseFloat(document.getElementById('rpt-amount').value) || 0;
   if (amt <= 0) { Swal.fire('Required', 'Enter valid amount', 'warning'); return; }
 
+  // Guard: amount must not exceed what the listed entries can absorb
+  var _totPend = (_rptEntries || []).reduce(function(s, e) { return s + (parseFloat(e.pending) || 0); }, 0);
+  if ((_rptEntries || []).length && amt > _totPend + 0.5) {
+    Swal.fire({
+      icon: 'warning', title: 'Amount pending se zyada hai',
+      html: 'Pending entries: <b>₹' + _ruFmt(_totPend) + '</b><br>Aapne daala: <b>₹' + _ruFmt(amt) + '</b><br>' +
+            '₹' + _ruFmt(amt - _totPend) + ' kisi entry pe apply nahi hoga.',
+      showCancelButton: true, showDenyButton: true,
+      confirmButtonText: 'Pending ke barabar karo', denyButtonText: 'Extra ke saath save karo', cancelButtonText: 'Cancel'
+    }).then(function(res) {
+      if (res.isConfirmed) {
+        var el = document.getElementById('rpt-amount');
+        if (el) { el.value = Math.round(_totPend * 100) / 100; }
+        if (typeof _rptUpdateFIFO === 'function') _rptUpdateFIFO();
+      } else if (res.isDenied) {
+        _rptDoSubmit(amt);
+      }
+    });
+    return;
+  }
+  _rptDoSubmit(amt);
+}
+
+function _rptDoSubmit(amt) {
   var data = {
     customer: _rptSelectedCustomer,
     amount: amt,
@@ -8509,5 +8532,32 @@ function _fuShowPrevBanner(retail, id) {
       }
       return _origSubmit.apply(this, arguments);
     };
+  }
+})();
+
+
+// ============================================================
+// RECORD PAYMENT MODAL — follows the Supply/Retail mode toggle.
+// Retail mode  -> only the Retail Payment form (no tab switcher)
+// Supply mode  -> only the Invoice Payment form (no tab switcher)
+// ============================================================
+function _applyRPModalMode() {
+  var isRetail = (typeof _activeMode !== 'undefined' && _activeMode === 'retail');
+  var invBtn = document.getElementById('rp-tab-invoice-btn');
+  var sw = invBtn && invBtn.parentNode;           // the tab-switcher bar
+  if (sw) sw.style.display = 'none';              // only one form applies per mode
+  if (typeof _switchRPTab === 'function') _switchRPTab(isRetail ? 'retail' : 'invoice');
+}
+window._applyRPModalMode = _applyRPModalMode;
+
+(function _hookOpenRPModalForMode() {
+  var _origOpen = window.openRPModal;
+  if (typeof _origOpen === 'function' && !_origOpen._modeHooked) {
+    window.openRPModal = function () {
+      var r = _origOpen.apply(this, arguments);
+      try { _applyRPModalMode(); } catch (e) {}
+      return r;
+    };
+    window.openRPModal._modeHooked = true;
   }
 })();
