@@ -2493,6 +2493,17 @@ function shortPage(d) {
           .withSuccessHandler(r => {
             if (r.success) {
               Swal.fire({ icon: 'success', title: 'Party Created!', text: r.msg, timer: 2000, showConfirmButton: false });
+              // Instant UI: add the new party locally now; _silentDataRefresh replaces it with server data
+              try {
+                DB.parties = DB.parties || [];
+                DB.parties.push(Object.assign({}, data, {
+                  partyID: r.partyID || ('TMP-' + Date.now()),
+                  creditLimit: parseFloat(data.creditLimit) || 0,
+                  rating: { stars: 3, label: 'New Party', delay: 0 },
+                  addedBy: (USER && USER.name) || URL_NAME || ''
+                }));
+                _populateFilters(); _buildAllPartySS(); _updateBadges();
+              } catch (e) {}
               resetPartyForm();
               _silentDataRefresh();
               setTimeout(() => nav('parties'), 1800);
@@ -2620,6 +2631,17 @@ function shortPage(d) {
           .withSuccessHandler(r => {
             if (r.success) {
               Swal.fire({ icon: 'success', title: 'Invoice Saved!', text: r.msg, timer: 2000, showConfirmButton: false });
+              // Instant UI: add the new invoice locally now; _silentDataRefresh replaces it with server data
+              try {
+                DB.invoices = DB.invoices || [];
+                DB.invoices.unshift(Object.assign({}, data, {
+                  invoiceID: r.invoiceID || ('TMP-' + Date.now()),
+                  paidAmount: 0, pendingAmount: data.netAmount, discountEarned: 0,
+                  writeOff: 0, difference: 0, status: 'Pending',
+                  addedBy: (USER && USER.name) || URL_NAME || ''
+                }));
+                _updateBadges();
+              } catch (e) {}
               resetInvoiceForm();
               _silentDataRefresh();
               setTimeout(() => nav('invoices'), 1800);
