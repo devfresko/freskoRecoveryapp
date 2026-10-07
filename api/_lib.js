@@ -7,21 +7,24 @@ const __m = {};
 // ───────────── firebase ─────────────
 __m.firebase = (() => {
   const module = { exports: {} };
-  // Firestore connection. The service account JSON lives ONLY in the Vercel
-  // environment variable FIREBASE_SERVICE_ACCOUNT (raw JSON or base64 of it).
-  // It must never be committed to git or placed in browser code.
-  const admin = require('firebase-admin');
+  // Firestore connection (firebase-admin v13/v14 modular API).
+  // The service account JSON lives ONLY in the Vercel environment variable
+  // FIREBASE_SERVICE_ACCOUNT (raw JSON or base64 of it). Never commit it to git.
+  const { initializeApp, cert, getApps } = require('firebase-admin/app');
+  const { getFirestore } = require('firebase-admin/firestore');
 
   function getDb() {
-    if (!admin.apps.length) {
+    if (!getApps().length) {
       const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
       if (!raw) throw new Error('FIREBASE_SERVICE_ACCOUNT env var is not set');
       const txt = raw.trim().startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8');
-      const json = JSON.parse(txt);
+      let json;
+      try { json = JSON.parse(txt); }
+      catch (e) { throw new Error('FIREBASE_SERVICE_ACCOUNT is not valid JSON - paste the whole key file content'); }
       if (json.private_key) json.private_key = json.private_key.replace(/\\n/g, '\n');
-      admin.initializeApp({ credential: admin.credential.cert(json) });
+      initializeApp({ credential: cert(json) });
     }
-    return admin.firestore();
+    return getFirestore();
   }
   module.exports = { getDb };
 
