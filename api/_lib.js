@@ -251,7 +251,7 @@ __m.rpc = (() => {
   // Same whitelist as Code.gs API_FUNCTIONS (+ getSnapshot, used server-side only).
   const ALLOWED = new Set([
     'loginUser', 'getAllData', 'createParty', 'createInvoice', 'bulkUploadInvoices', 'writeOffInvoice',
-    'closeInvoice', 'updateInvoice', 'updateFollowUp', 'recordPayment', 'updatePayment',
+    'closeInvoice', 'updateInvoice', 'updateFollowUp', 'recordPayment', 'updatePayment', 'deletePayment',
     'previewRecalcPartyInvoices', 'recalcPartyInvoices', 'saveFollowUp', 'updatePromiseKept', 'getAnalytics',
     'getAppUrl', 'checkLastUpdate', 'bustAllCaches', 'sendWhatsAppMessage', 'sendWhatsAppToParty',
     'getRetailData', 'checkRetailDuplicates', 'commitRetailData', 'getRetailCustomersWithPending',
