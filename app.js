@@ -1832,7 +1832,7 @@ function nav(v) {
 
         // Sortable header
         const thead = document.getElementById('pay-thead');
-        if (thead) thead.innerHTML = '<tr>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;party&quot;)">Party' + _paySortIcon('party') + '</th>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;date&quot;)">Date' + _paySortIcon('date') + '</th>' + '<th>Mode</th><th>Ref No</th>' + '<th class="num" style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;amt&quot;)">Amount' + _paySortIcon('amt') + '</th>' + '<th>Applied To</th><th>By</th><th class="admin-only">Edit</th></tr>';
+        if (thead) thead.innerHTML = '<tr>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;party&quot;)">Party' + _paySortIcon('party') + '</th>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;date&quot;)">Date' + _paySortIcon('date') + '</th>' + '<th>Mode</th><th>Ref No</th>' + '<th class="num" style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;amt&quot;)">Amount' + _paySortIcon('amt') + '</th>' + '<th>Applied To</th><th>By</th><th>Edit</th></tr>';
 
         const tbody = document.getElementById('pay-tbody');
         if (!tbody) return;
@@ -1850,7 +1850,7 @@ function nav(v) {
             '<td class="num" style="color:var(--green);font-weight:700">' + INR(p.amount) + '</td>' +
             '<td style="color:var(--muted);font-size:10px;max-width:110px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">' + (p.appliedTo||'--') + '</td>' +
             '<td style="color:var(--muted);font-size:10px">' + (p.recordedBy||'--') + '</td>' +
-            '<td class="admin-only"><button class="act-btn ab-edit" onclick="openEditPaymentModal(\'' + escQ(p.paymentID) + '\')" title="Edit Payment"><i class="fas fa-edit"></i></button></td>' +
+            '<td><button class="act-btn ab-edit" onclick="openEditPaymentModal(\'' + escQ(p.paymentID) + '\')" title="Edit Payment"><i class="fas fa-edit"></i></button></td>' +
             '</tr>'
           ).join('');
           return '<tr class="pay-group-hdr" data-idx="' + idx + '" style="background:#F8FAFC;cursor:pointer" onclick="togglePayGroup(+this.dataset.idx)">' +
@@ -4882,7 +4882,6 @@ function shortPage(d) {
       let _editPayID = null;
 
       function openEditPaymentModal(paymentID) {
-        if (!window._isAdmin) { Swal.fire('Access Denied', 'Only Admin can edit payments.', 'error'); return; }
         const p = (DB.payments || []).find(x => x.paymentID === paymentID);
         if (!p) { Swal.fire('Error', 'Payment not found.', 'error'); return; }
         _editPayID = paymentID;
@@ -5023,6 +5022,57 @@ function shortPage(d) {
             Swal.fire('Error', e.message, 'error');
           })
           .updatePayment(data, URL_NAME);
+      }
+
+
+      function confirmDeletePayment() {
+        if (!_editPayID) return;
+        const p = (DB.payments || []).find(x => x.paymentID === _editPayID);
+        const applied = (p && p.appliedTo) ? p.appliedTo : '--';
+        Swal.fire({
+          title: 'Delete this payment?',
+          html: '<div style="text-align:left;font-size:13px;line-height:1.5">' +
+            '<b>Payment ID:</b> ' + (_editPayID || '') + '<br>' +
+            (p ? ('<b>Party:</b> ' + (p.partyName || '') + '<br><b>Amount:</b> ₹' + (p.amount || 0).toLocaleString('en-IN') + '<br>') : '') +
+            '<b>Applied to:</b> <span style="font-family:monospace;font-size:11px">' + applied + '</span><br><br>' +
+            '<span style="color:#C5221F"><b>Invoices se ye payment hata di jayegi</b> — unka paid amount kam ho jayega aur status Pending / PartPaid ho sakta hai.</span></div>',
+          icon: 'warning',
+          showCancelButton: true,
+          confirmButtonColor: '#C5221F',
+          confirmButtonText: 'Haan, delete karo',
+          cancelButtonText: 'Cancel'
+        }).then(function (r) {
+          if (!r.isConfirmed) return;
+          const payID = _editPayID;
+          Swal.fire({ title: 'Deleting...', allowOutsideClick: false, didOpen: function () { Swal.showLoading(); } });
+          google.script.run
+            .withSuccessHandler(function (res) {
+              if (res && res.success) {
+                DB.payments = (DB.payments || []).filter(function (x) { return x.paymentID !== payID; });
+                if (res.reversed && res.reversed.length && DB.invoices) {
+                  res.reversed.forEach(function (rv) {
+                    var inv = DB.invoices.find(function (i) { return i.invoiceNo === rv.invoiceNo; });
+                    if (!inv) return;
+                    inv.paidAmount = rv.newPaid;
+                    inv.status = rv.status;
+                    inv.pendingAmount = Math.max(0, (inv.netAmount || inv.billValue || 0) - (inv.paidAmount || 0) - (inv.writeOff || 0));
+                  });
+                }
+                try { _idb.set('mainDB', DB); } catch (e) {}
+                closeEditDrawer('pay');
+                Swal.fire({ icon: 'success', title: 'Deleted', text: res.msg || 'Payment deleted', timer: 2200, showConfirmButton: false });
+                _updateBadges();
+                if (typeof renderPayments === 'function') renderPayments();
+                if (typeof _silentDataRefresh === 'function') _silentDataRefresh();
+              } else {
+                Swal.fire('Error', (res && res.error) || 'Delete failed', 'error');
+              }
+            })
+            .withFailureHandler(function (e) {
+              Swal.fire('Error', (e && e.message) || 'Network error', 'error');
+            })
+            .deletePayment(payID, URL_NAME);
+        });
       }
 
       function closeEditDrawer(type) {
