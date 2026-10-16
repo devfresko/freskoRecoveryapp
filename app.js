@@ -4905,10 +4905,14 @@ function shortPage(d) {
             <span style="color:var(--muted)">Party</span>
             <span style="font-weight:600">${p.partyName}</span>
           </div>
-          <div class="edit-badge-row">
-            <span style="color:var(--muted)">Applied To</span>
-            <span style="font-size:11px;font-family:monospace">${p.appliedTo || '--'}</span>
+          <div class="edit-section-title" style="margin-top:8px;color:#C5221F">
+            <i class="fas fa-unlink" style="margin-right:6px"></i>Un-apply Invoices
+            <span style="font-weight:500;font-size:11px;color:var(--muted);margin-left:6px">tick karke Pending banao</span>
           </div>
+          <div id="ep-unapply-list" style="margin-bottom:12px;max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:10px;padding:8px;background:#FAFBFC"></div>
+          <button type="button" class="btn btn-sm" id="ep-unapply-btn" style="background:#FCE8E6;color:#C5221F;border:1px solid #F5C6C2;margin-bottom:14px" onclick="unapplySelectedInvoices()">
+            <i class="fas fa-undo"></i> Selected invoices ko Pending karo
+          </button>
 
           <div class="edit-section-title" style="margin-top:4px">Date & Amount</div>
           <div class="edit-grid-2">
@@ -4975,6 +4979,7 @@ function shortPage(d) {
             <textarea id="ep-remarks">${p.remarks || ''}</textarea>
           </div>
         `;
+        _renderEpUnapplyList(p);
         document.getElementById('edit-pay-overlay').classList.add('show');
         document.body.style.overflow = 'hidden';
       }
@@ -5024,6 +5029,121 @@ function shortPage(d) {
           .updatePayment(data, URL_NAME);
       }
 
+
+
+      function _parseAppliedToList(appliedTo, appliedAmt) {
+        var list = [];
+        var raw = (appliedTo || '').toString().trim();
+        if (!raw) return list;
+        var parts = raw.split(',');
+        var needSplit = false;
+        parts.forEach(function (part) {
+          part = part.trim();
+          if (!part) return;
+          var colon = part.lastIndexOf(':');
+          if (colon > 0 && !isNaN(parseFloat(part.substring(colon + 1)))) {
+            list.push({ invoiceNo: part.substring(0, colon).trim(), amount: parseFloat(part.substring(colon + 1)) || 0 });
+          } else {
+            list.push({ invoiceNo: part, amount: null });
+            needSplit = true;
+          }
+        });
+        if (needSplit && list.length) {
+          var base = parseFloat(appliedAmt) || 0;
+          // Prefer matching invoice paid/pending for display estimate
+          list.forEach(function (a) {
+            if (a.amount !== null) return;
+            var inv = (DB.invoices || []).find(function (i) { return i.invoiceNo === a.invoiceNo; });
+            if (inv && inv.paidAmount > 0) a.amount = inv.paidAmount; // best-effort display
+            else a.amount = Math.round((base / list.length) * 100) / 100;
+          });
+        }
+        return list;
+      }
+
+      function _renderEpUnapplyList(p) {
+        var box = document.getElementById('ep-unapply-list');
+        if (!box) return;
+        var list = _parseAppliedToList(p.appliedTo, p.appliedAmt || p.amount);
+        if (!list.length) {
+          box.innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:12px">Is payment pe koi invoice applied nahi hai</div>';
+          var btn = document.getElementById('ep-unapply-btn');
+          if (btn) btn.style.display = 'none';
+          return;
+        }
+        var btn = document.getElementById('ep-unapply-btn');
+        if (btn) btn.style.display = '';
+        box.innerHTML = list.map(function (a, idx) {
+          var inv = (DB.invoices || []).find(function (i) { return i.invoiceNo === a.invoiceNo; });
+          var st = inv ? (inv.status || '') : '';
+          var amt = (a.amount != null ? a.amount : 0);
+          return '<label style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid #F1F5F9;cursor:pointer;font-size:12px">' +
+            '<input type="checkbox" class="ep-unapply-cb" value="' + String(a.invoiceNo).replace(/"/g, '&quot;') + '" style="width:16px;height:16px;accent-color:#C5221F">' +
+            '<span style="flex:1;min-width:0"><b style="font-family:monospace">' + String(a.invoiceNo).replace(/</g,'&lt;') + '</b>' +
+            (inv ? ' <span style="color:var(--muted)">· ' + String(inv.partyName || '').replace(/</g,'&lt;') + '</span>' : '') +
+            (st ? ' <span class="badge" style="font-size:9px;margin-left:4px">' + st + '</span>' : '') +
+            '</span>' +
+            '<span style="font-weight:700;color:#C5221F;white-space:nowrap">₹' + Math.round(amt).toLocaleString('en-IN') + '</span>' +
+            '</label>';
+        }).join('');
+      }
+
+      function unapplySelectedInvoices() {
+        if (!_editPayID) return;
+        var cbs = document.querySelectorAll('.ep-unapply-cb:checked');
+        var nos = [];
+        cbs.forEach(function (c) { if (c.value) nos.push(c.value); });
+        if (!nos.length) {
+          Swal.fire('Select invoices', 'Jo invoices Pending karne hain unpe tick lagao.', 'info');
+          return;
+        }
+        Swal.fire({
+          title: nos.length + ' invoice(s) un-apply?',
+          html: '<div style="text-align:left;font-size:12px">Ye invoices is payment se hat jayenge aur <b>Pending / PartPaid</b> ho sakte hain. Payment entry rahegi — sirf allocation change hogi.<br><br><b>' +
+            nos.map(function (n) { return n; }).join(', ') + '</b></div>',
+          icon: 'question',
+          showCancelButton: true,
+          confirmButtonColor: '#C5221F',
+          confirmButtonText: 'Haan, Pending karo',
+          cancelButtonText: 'Cancel'
+        }).then(function (r) {
+          if (!r.isConfirmed) return;
+          Swal.fire({ title: 'Updating...', allowOutsideClick: false, didOpen: function () { Swal.showLoading(); } });
+          google.script.run
+            .withSuccessHandler(function (res) {
+              if (res && res.success) {
+                // optimistic local
+                if (res.reversed && DB.invoices) {
+                  res.reversed.forEach(function (rv) {
+                    var inv = DB.invoices.find(function (i) { return i.invoiceNo === rv.invoiceNo; });
+                    if (!inv) return;
+                    inv.paidAmount = rv.newPaid;
+                    inv.status = rv.status;
+                    inv.pendingAmount = Math.max(0, (inv.netAmount || inv.billValue || 0) - (inv.paidAmount || 0) - (inv.writeOff || 0));
+                  });
+                }
+                var pay = (DB.payments || []).find(function (x) { return x.paymentID === _editPayID; });
+                if (pay) {
+                  pay.appliedTo = res.remainingAppliedTo || '';
+                  pay.appliedAmt = res.appliedAmt || 0;
+                  pay.unallocated = res.unallocated || 0;
+                }
+                try { _idb.set('mainDB', DB); } catch (e) {}
+                if (pay) _renderEpUnapplyList(pay);
+                Swal.fire({ icon: 'success', title: 'Done', text: res.msg || 'Un-applied', timer: 2200, showConfirmButton: false });
+                _updateBadges();
+                if (typeof renderPayments === 'function') renderPayments();
+                if (typeof _silentDataRefresh === 'function') _silentDataRefresh();
+              } else {
+                Swal.fire('Error', (res && res.error) || 'Failed', 'error');
+              }
+            })
+            .withFailureHandler(function (e) {
+              Swal.fire('Error', (e && e.message) || 'Network error', 'error');
+            })
+            .unapplyPaymentInvoices(_editPayID, nos, URL_NAME);
+        });
+      }
 
       function confirmDeletePayment() {
         if (!_editPayID) return;
