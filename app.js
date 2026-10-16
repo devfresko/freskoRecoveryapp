@@ -210,6 +210,93 @@ var _idb = (function() {
       var SUPPLY_HOME_VIEW = 'dashboard';
       var RETAIL_HOME_VIEW = 'retailDashboard';
 
+
+// ============================================================
+// GENERIC TABLE COLUMN SORT
+// Usage: list = _tblSorted('parties', list, { name: r=>r.name, out: r=>r._out });
+// Headers: <th data-tbl="parties" data-col="name" data-type="str">Party</th>
+// ============================================================
+var _tblSortState = {};
+var _TBL_RENDER = {}; // filled after functions exist
+
+function _tblToggleSort(key, col, type) {
+  var s = _tblSortState[key] || { col: null, dir: 1 };
+  if (s.col === col) s.dir = -s.dir;
+  else {
+    s.col = col;
+    s.dir = (type === 'num' || type === 'date') ? -1 : 1;
+  }
+  _tblSortState[key] = s;
+  _tblUpdateIcons(key);
+  var fn = _TBL_RENDER[key];
+  if (typeof fn === 'function') fn();
+}
+
+function _tblSortIcon(key, col) {
+  var s = _tblSortState[key];
+  if (!s || s.col !== col) return ' <i class="fas fa-sort tbl-sort-ic" style="opacity:.28;font-size:10px"></i>';
+  return s.dir < 0
+    ? ' <i class="fas fa-sort-down tbl-sort-ic" style="opacity:.9;font-size:10px;color:var(--primary)"></i>'
+    : ' <i class="fas fa-sort-up tbl-sort-ic" style="opacity:.9;font-size:10px;color:var(--primary)"></i>';
+}
+
+function _tblUpdateIcons(key) {
+  document.querySelectorAll('th[data-tbl="' + key + '"]').forEach(function (th) {
+    var col = th.getAttribute('data-col');
+    var base = th.getAttribute('data-label') || '';
+    if (!base) {
+      var clone = th.cloneNode(true);
+      var icons = clone.querySelectorAll('i');
+      for (var i = 0; i < icons.length; i++) icons[i].remove();
+      base = (clone.textContent || '').trim();
+      th.setAttribute('data-label', base);
+    }
+    th.innerHTML = base + _tblSortIcon(key, col);
+  });
+}
+
+function _tblVal(v, type) {
+  if (v == null || v === '') return type === 'num' || type === 'date' ? -Infinity : '';
+  if (type === 'num') {
+    if (typeof v === 'number') return v;
+    var n = parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
+    return isNaN(n) ? -Infinity : n;
+  }
+  if (type === 'date') {
+    if (v instanceof Date) return v.getTime();
+    if (typeof v === 'number') return v;
+    var d = (typeof parseIST === 'function') ? parseIST(v) : null;
+    if (d) return d.getTime();
+    var t = Date.parse(v);
+    return isNaN(t) ? -Infinity : t;
+  }
+  return String(v).toLowerCase();
+}
+
+function _tblSorted(key, list, getters, types) {
+  var s = _tblSortState[key];
+  if (!s || !s.col || !getters[s.col]) return list;
+  var type = (types && types[s.col]) || 'str';
+  var getter = getters[s.col];
+  var dir = s.dir;
+  return list.slice().sort(function (a, b) {
+    var av = _tblVal(getter(a), type);
+    var bv = _tblVal(getter(b), type);
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+}
+
+// Click delegation for data-tbl headers
+document.addEventListener('click', function (e) {
+  var th = e.target.closest('th[data-tbl]');
+  if (!th) return;
+  e.preventDefault();
+  _tblToggleSort(th.getAttribute('data-tbl'), th.getAttribute('data-col'), th.getAttribute('data-type') || 'str');
+});
+
+
       const PER = 25;
       let _pState = { parties: 1, invoices: 1, payments: 1, followups: 1, promises: 1, escalations: 1, shortpay: 1, latepay: 1, discountTBG: 1, writeoffs: 1 };
       let _filtered = { parties: [], invoices: [], payments: [], followups: [] };
@@ -1493,6 +1580,14 @@ function nav(v) {
             lastFU[f.partyID] = f;
         });
 
+        if (typeof list !== 'undefined' && list && list.length !== undefined) {
+          list = _tblSorted('od', list, {
+            party: function(i){return i.partyName;}, invNo: function(i){return i.invoiceNo;},
+            due: function(i){return i.dueDate;}, days: function(i){return daysOD(i);},
+            pend: function(i){return pending(i);}
+          }, { party:'str', invNo:'str', due:'date', days:'num', pend:'num' });
+          try { _tblUpdateIcons('od'); } catch(e) {}
+        }
         const tbody = document.getElementById('od-tbody');
         tbody.innerHTML = overdue.length === 0
           ? emptyRow(8, '[OK] No overdue invoices')
@@ -1580,6 +1675,13 @@ function nav(v) {
           (p.city || '').toLowerCase().includes(q)
         );
 
+        list = _tblSorted('parties', list, {
+          name: function(p){return p.name;}, city: function(p){return p.city;}, head: function(p){return p.head;},
+          slab: function(p){return p.days15 ? 15 : p.days1 ? 1 : 0;},
+          out: function(p){return (DB.invoices||[]).filter(function(i){return i.partyID===p.partyID&&!isPaid(i);}).reduce(function(s,i){return s+pending(i);},0);},
+          status: function(p){return p.status;}
+        }, { name:'str', city:'str', head:'str', slab:'num', out:'num', status:'str' });
+        try { _tblUpdateIcons('parties'); } catch(e) {}
         _filtered.parties = list;
         const total = list.length;
         const page = list.slice((_pState.parties - 1) * PER, _pState.parties * PER);
@@ -1649,6 +1751,14 @@ function nav(v) {
             (!pf || inv.partyID === pf);
         }).sort((a, b) => (parseIST(b.invoiceDate) || 0) - (parseIST(a.invoiceDate) || 0));
 
+        list = _tblSorted('inv', list, {
+          invNo: function(i){return i.invoiceNo;}, party: function(i){return i.partyName;},
+          date: function(i){return i.invoiceDate;}, due: function(i){return i.dueDate;},
+          slab: function(i){return i.slabPct;}, bill: function(i){return i.billValue||i.netAmount;},
+          diff: function(i){return i.difference;}, paid: function(i){return i.paidAmount;},
+          pend: function(i){return pending(i);}, status: function(i){return i.status;}
+        }, { invNo:'str', party:'str', date:'date', due:'date', slab:'str', bill:'num', diff:'num', paid:'num', pend:'num', status:'str' });
+        try { _tblUpdateIcons('inv'); } catch(e) {}
         _filtered.invoices = list;
         const total = list.length;
         const page = list.slice((_pState.invoices - 1) * PER, _pState.invoices * PER);
@@ -1817,6 +1927,18 @@ function nav(v) {
 
         let groups = Object.values(gMap);
         // Sort groups
+        // prefer generic tbl sort when set
+        if (_tblSortState.pay && _tblSortState.pay.col) {
+          groups = _tblSorted('pay', groups, {
+            party: function(g){return g.partyName;},
+            date: function(g){return g.latestDate;},
+            amt: function(g){return g.total;},
+            mode: function(g){return (g.items&&g.items[0]&&g.items[0].mode)||'';},
+            ref: function(g){return (g.items&&g.items[0]&&g.items[0].refNo)||'';},
+            applied: function(g){return (g.items&&g.items[0]&&g.items[0].appliedTo)||'';},
+            by: function(g){return (g.items&&g.items[0]&&g.items[0].recordedBy)||'';}
+          }, { party:'str', date:'date', amt:'num', mode:'str', ref:'str', applied:'str', by:'str' });
+        }
         groups.sort((a, b) => {
           if (_paySort.col === 'party') return a.partyName.localeCompare(b.partyName) * _paySort.dir;
           if (_paySort.col === 'amt')   return (b.total - a.total) * _paySort.dir;
@@ -1832,7 +1954,7 @@ function nav(v) {
 
         // Sortable header
         const thead = document.getElementById('pay-thead');
-        if (thead) thead.innerHTML = '<tr>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;party&quot;)">Party' + _paySortIcon('party') + '</th>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;date&quot;)">Date' + _paySortIcon('date') + '</th>' + '<th>Mode</th><th>Ref No</th>' + '<th class="num" style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;amt&quot;)">Amount' + _paySortIcon('amt') + '</th>' + '<th>Applied To</th><th>By</th><th>Edit</th></tr>';
+        if (thead) thead.innerHTML = '<tr>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;party&quot;)">Party' + _paySortIcon('party') + '</th>' + '<th style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;date&quot;)">Date' + _paySortIcon('date') + '</th>' + '<th>Mode</th><th>Ref No</th>' + '<th class="num" style="cursor:pointer;user-select:none" onclick="setPaySort(&quot;amt&quot;)">Amount' + _paySortIcon('amt') + '</th>' + '<th data-tbl="pay" data-col="applied" data-type="str" data-label="Applied To" style="cursor:pointer;user-select:none">Applied To</th><th data-tbl="pay" data-col="by" data-type="str" data-label="By" style="cursor:pointer;user-select:none">By</th><th>Edit</th></tr>';
 
         const tbody = document.getElementById('pay-tbody');
         if (!tbody) return;
@@ -1927,6 +2049,15 @@ function nav(v) {
             return true;
           })
           .sort((a, b) => (parseIST(a.dueDate) || 0) - (parseIST(b.dueDate) || 0));
+        var _sk = (slab === '15' ? 's15' : slab === '1' ? 's1' : 'sNil');
+        list = _tblSorted(_sk, list, {
+          invNo: function(i){return i.invoiceNo;}, party: function(i){return i.partyName;},
+          idate: function(i){return i.invoiceDate;}, due: function(i){return i.dueDate;},
+          bill: function(i){return i.billValue||i.netAmount;}, pend: function(i){return pending(i);},
+          status: function(i){return i.status;}
+        }, { invNo:'str', party:'str', idate:'date', due:'date', bill:'num', pend:'num', status:'str' });
+        try { _tblUpdateIcons(_sk); } catch(e) {}
+
 
         const totalExpected = list.reduce((s, i) => s + calcExpected(i).expected, 0);
         txt(prefix + '-sub', list.length + ' pending invoices');
@@ -2046,6 +2177,13 @@ function shortPage(d) {
         txt('sp-info', `${((pg - 1) * PER) + 1}-${Math.min(pg * PER, total)} of ${total} invoices`);
         _updatePager('sp', pg, total);
 
+        list = _tblSorted('sp', list, {
+          party: function(r){return r.partyName;}, inv: function(r){return r.invoiceNo;},
+          date: function(r){return r.invoiceDate;}, bill: function(r){return r.billValue||r.netAmount;},
+          paid: function(r){return r.paidAmount;}, pend: function(r){return pending(r);},
+          status: function(r){return r.status;}
+        }, { party:'str', inv:'str', date:'date', bill:'num', paid:'num', pend:'num', status:'str' });
+        try { _tblUpdateIcons('sp'); } catch(e) {}
         const tbody = document.getElementById('sp-tbody');
         if (!tbody) return;
 
@@ -4003,6 +4141,15 @@ function shortPage(d) {
           return true;
         }).sort((a, b) => (b.datetime || '').localeCompare(a.datetime || ''));
 
+        list = _tblSorted('fu', list, {
+          dt: function(f){return f.datetime;}, party: function(f){return f.partyName;},
+          mode: function(f){return f.mode;}, contact: function(f){return f.contactPerson;},
+          notes: function(f){return f.notes;}, promise: function(f){return f.promiseAmt;},
+          pdate: function(f){return f.promiseDate;}, pri: function(f){return f.priority;},
+          kept: function(f){return f.promiseKept;}
+        }, { dt:'date', party:'str', mode:'str', contact:'str', notes:'str', promise:'num', pdate:'date', pri:'str', kept:'str' });
+        try { _tblUpdateIcons('fu'); } catch(e) {}
+
         _filtered.followups = list;
         txt('fu-sub', list.length + ' follow-up(s) logged');
         txt('fu-count-badge', list.length);
@@ -4078,6 +4225,13 @@ function shortPage(d) {
 
         txt('pt-kept', kept); txt('pt-broken', broken); txt('pt-partial', partial); txt('pt-pending', pending);
 
+        list = _tblSorted('pt', list, {
+          party: function(f){return f.partyName;}, dt: function(f){return f.datetime;},
+          mode: function(f){return f.mode;}, promise: function(f){return f.promiseAmt;},
+          pdate: function(f){return f.promiseDate;}, kept: function(f){return f.promiseKept;},
+          next: function(f){return f.nextAction;}
+        }, { party:'str', dt:'date', mode:'str', promise:'num', pdate:'date', kept:'str', next:'str' });
+        try { _tblUpdateIcons('pt'); } catch(e) {}
         const tbody = document.getElementById('pt-tbody');
         if (!tbody) return;
         if (!list.length) { tbody.innerHTML = emptyRow(8, 'No promises found'); return; }
@@ -4145,6 +4299,12 @@ function shortPage(d) {
         if (badge) badge.textContent = INR(totalDTBG) + ' pending';
         txt('dtbg-info', total > 0 ? ((pg-1)*PER+1)+'-'+Math.min(pg*PER,total)+' of '+total : '0 records');
         _updatePager('dtbg', pg, total);
+        list = _tblSorted('dtbg', list, {
+          party: function(r){return r.partyName||r.name;}, inv: function(r){return r.invoiceNo;},
+          amt: function(r){return r.amount||r.discountToBeGiven||r.disc;},
+          date: function(r){return r.date||r.paymentDate||r.invoiceDate;}
+        }, { party:'str', inv:'str', amt:'num', date:'date' });
+        try { _tblUpdateIcons('dtbg'); } catch(e) {}
         const tbody = document.getElementById('dtbg-tbody');
         if (!tbody) return;
         tbody.innerHTML = page.length === 0
@@ -4209,6 +4369,11 @@ function shortPage(d) {
         const stMon   = document.getElementById('wo-stat-month'); if(stMon) stMon.textContent = INR(thisMonthWO);
         txt('wo-info', total > 0 ? ((pg-1)*PER+1)+'-'+Math.min(pg*PER,total)+' of '+total : '0 records');
         _updatePager('wo', pg, total);
+        list = _tblSorted('wo', list, {
+          party: function(r){return r.partyName;}, inv: function(r){return r.invoiceNo;},
+          amt: function(r){return r.writeOff||r.amount;}, date: function(r){return r.date||r.addedOn;}
+        }, { party:'str', inv:'str', amt:'num', date:'date' });
+        try { _tblUpdateIcons('wo'); } catch(e) {}
         const tbody = document.getElementById('wo-tbody');
         if (!tbody) return;
         tbody.innerHTML = page.length === 0
@@ -4261,6 +4426,12 @@ function shortPage(d) {
         txt('esc-kept', kept);
         txt('esc-pending', pending);
 
+        list = _tblSorted('esc', list, {
+          party: function(f){return f.partyName;}, dt: function(f){return f.datetime;},
+          to: function(f){return f.escalatedTo;}, out: function(f){return f.outstandingAmt;},
+          notes: function(f){return f.notes;}
+        }, { party:'str', dt:'date', to:'str', out:'num', notes:'str' });
+        try { _tblUpdateIcons('esc'); } catch(e) {}
         const tbody = document.getElementById('esc-tbody');
         if (!tbody) return;
         if (!list.length) { tbody.innerHTML = emptyRow(9, 'No escalations found'); return; }
@@ -6202,6 +6373,14 @@ function _renderRetailSalesTable() {
     }
     return true;
   });
+  list = _tblSorted('rs', list, {
+    date: function(r){return r.saleDate||r.date;},
+    cust: function(r){return r.customer||r.Customer_Name;},
+    qty: function(r){return r.qty||r.Qty||0;},
+    amt: function(r){return r.amount||r.Total_Amount||0;},
+    pend: function(r){return r.pending||r.Pending_Amount||0;}
+  }, { date:'date', cust:'str', qty:'num', amt:'num', pend:'num' });
+  try { _tblUpdateIcons('rs'); } catch(e) {}
 
   var total = list.length;
   txt('rs-sub', total + ' entries');
@@ -7618,6 +7797,12 @@ function renderRetailCustomers() {
   // If customers not loaded yet, fetch then re-render
   if (!(DB.retailCustomers && DB.retailCustomers.length) && !renderRetailCustomers._loading) {
     renderRetailCustomers._loading = true;
+        list = _tblSorted('rc', list, {
+          name: function(c){return c.name;}, phone: function(c){return c.phone;},
+          city: function(c){return c.city;}, status: function(c){return c.status;},
+          pend: function(c){return c.pending||c.outstanding||0;}
+        }, { name:'str', phone:'str', city:'str', status:'str', pend:'num' });
+        try { _tblUpdateIcons('rc'); } catch(e) {}
     var tbody0 = document.getElementById('rc-tbody');
     if (tbody0) tbody0.innerHTML = '<tr><td colspan="6" class="center" style="padding:24px;color:var(--muted)">Loading...</td></tr>';
     _loadAllRetailCustomers(function() {
@@ -7830,6 +8015,12 @@ function renderRetailPayments() {
   var totalAmt = list.reduce(function (s, p) { return s + (p.amount || 0); }, 0);
   txt('rpay-total-badge', '₹' + _ruFmt(totalAmt));
 
+        list = _tblSorted('rpay', list, {
+          party: function(p){return p.partyName||p.customer;}, date: function(p){return p.paymentDate;},
+          mode: function(p){return p.mode;}, amt: function(p){return p.amount;},
+          ref: function(p){return p.refNo;}, by: function(p){return p.recordedBy;}
+        }, { party:'str', date:'date', mode:'str', amt:'num', ref:'str', by:'str' });
+        try { _tblUpdateIcons('rpay'); } catch(e) {}
   var tbody = document.getElementById('rpay-tbody');
   if (!tbody) return;
 
@@ -8017,6 +8208,12 @@ function rfuPage(dir) {
 }
 
 function renderRetailFollowups() {
+        list = _tblSorted('rfu', list, {
+          dt: function(f){return f.datetime;}, party: function(f){return f.partyName;},
+          mode: function(f){return f.mode;}, notes: function(f){return f.notes;},
+          promise: function(f){return f.promiseAmt;}, pdate: function(f){return f.promiseDate;}
+        }, { dt:'date', party:'str', mode:'str', notes:'str', promise:'num', pdate:'date' });
+        try { _tblUpdateIcons('rfu'); } catch(e) {}
   var tbody = document.getElementById('rfu-tbody');
   if (!tbody) return;
 
@@ -8486,6 +8683,11 @@ window.__chunkProgress = function (text) {
 
 
 function renderRetailAging() {
+        list = _tblSorted('ra', list, {
+          name: function(r){return r.customer||r.name;}, pend: function(r){return r.pending||0;},
+          days: function(r){return r.days||r.age||0;}, last: function(r){return r.lastSale||r.saleDate;}
+        }, { name:'str', pend:'num', days:'num', last:'date' });
+        try { _tblUpdateIcons('ra'); } catch(e) {}
   var tbody = document.getElementById('ra-tbody');
   if (!tbody) return;
 
@@ -8861,6 +9063,35 @@ function _applyRPModalMode() {
   if (typeof _switchRPTab === 'function') _switchRPTab(isRetail ? 'retail' : 'invoice');
 }
 window._applyRPModalMode = _applyRPModalMode;
+
+
+// Register table sort → re-render map
+(function () {
+  function reg(k, fn) { if (typeof fn === 'function') _TBL_RENDER[k] = fn; }
+  reg('od', function () { if (typeof renderOverdue === 'function') renderOverdue(); });
+  reg('parties', function () { if (typeof renderParties === 'function') renderParties(); });
+  reg('inv', function () { if (typeof renderInvoices === 'function') renderInvoices(); });
+  reg('invPend', function () { if (typeof renderInvoices === 'function') renderInvoices(); });
+  reg('s15', function () { if (typeof renderSlabDue === 'function') renderSlabDue('15'); });
+  reg('s1', function () { if (typeof renderSlabDue === 'function') renderSlabDue('1'); });
+  reg('sNil', function () { if (typeof renderSlabDue === 'function') renderSlabDue('Nil'); });
+  reg('sp', function () { if (typeof renderShortPay === 'function') renderShortPay(); });
+  reg('lp', function () { if (typeof renderLatePay === 'function') renderLatePay(); });
+  reg('pay', function () { if (typeof renderPayments === 'function') renderPayments(); });
+  reg('fu', function () { if (typeof renderFollowups === 'function') renderFollowups(); });
+  reg('pt', function () { if (typeof renderPromises === 'function') renderPromises(); });
+  reg('esc', function () { if (typeof renderEscalations === 'function') renderEscalations(); });
+  reg('dtbg', function () { if (typeof renderDiscountTBG === 'function') renderDiscountTBG(); });
+  reg('wo', function () { if (typeof renderWriteOffs === 'function') renderWriteOffs(); });
+  reg('rc', function () { if (typeof renderRetailCustomers === 'function') renderRetailCustomers(); });
+  reg('rpay', function () { if (typeof renderRetailPayments === 'function') renderRetailPayments(); });
+  reg('rs', function () { if (typeof renderRetailSales === 'function') renderRetailSales(); });
+  reg('ra', function () { if (typeof renderRetailAging === 'function') renderRetailAging(); });
+  reg('rfu', function () { if (typeof renderRetailFollowups === 'function') renderRetailFollowups(); });
+  reg('rpt', function () { if (typeof renderRetailPromises === 'function') renderRetailPromises(); });
+  reg('resc', function () { if (typeof renderRetailEscalations === 'function') renderRetailEscalations(); });
+  reg('rdCust', function () { if (typeof renderRetailDashboard === 'function') renderRetailDashboard(); });
+})();
 
 (function _hookOpenRPModalForMode() {
   var _origOpen = window.openRPModal;
