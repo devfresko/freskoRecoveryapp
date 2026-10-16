@@ -5034,15 +5034,20 @@ function shortPage(d) {
       function _parseAppliedToList(appliedTo, appliedAmt) {
         var list = [];
         var raw = (appliedTo || '').toString().trim();
-        if (!raw) return list;
-        var parts = raw.split(',');
+        if (!raw || raw === '--') return list;
+        // Support comma / semicolon / newline separators
+        var parts = raw.split(/[,;\n]+/);
         var needSplit = false;
         parts.forEach(function (part) {
-          part = part.trim();
+          part = String(part || '').trim();
           if (!part) return;
-          var colon = part.lastIndexOf(':');
-          if (colon > 0 && !isNaN(parseFloat(part.substring(colon + 1)))) {
-            list.push({ invoiceNo: part.substring(0, colon).trim(), amount: parseFloat(part.substring(colon + 1)) || 0 });
+          // "INV-001:5000" or "INV-001 = 5000" or "INV-001 - 5000"
+          var m = part.match(/^(.+?)[:\=\-]\s*([\d,.]+)\s*$/);
+          if (m && !isNaN(parseFloat(m[2].replace(/,/g, '')))) {
+            list.push({
+              invoiceNo: m[1].trim(),
+              amount: parseFloat(m[2].replace(/,/g, '')) || 0
+            });
           } else {
             list.push({ invoiceNo: part, amount: null });
             needSplit = true;
@@ -5050,12 +5055,26 @@ function shortPage(d) {
         });
         if (needSplit && list.length) {
           var base = parseFloat(appliedAmt) || 0;
-          // Prefer matching invoice paid/pending for display estimate
-          list.forEach(function (a) {
-            if (a.amount !== null) return;
-            var inv = (DB.invoices || []).find(function (i) { return i.invoiceNo === a.invoiceNo; });
-            if (inv && inv.paidAmount > 0) a.amount = inv.paidAmount; // best-effort display
-            else a.amount = Math.round((base / list.length) * 100) / 100;
+          var withBill = list.map(function (a) {
+            var inv = (DB.invoices || []).find(function (i) {
+              return String(i.invoiceNo).trim() === String(a.invoiceNo).trim();
+            });
+            return { a: a, inv: inv, bill: inv ? (parseFloat(inv.netAmount || inv.billValue) || 0) : 0 };
+          });
+          var totalBill = withBill.reduce(function (s, x) { return s + x.bill; }, 0);
+          withBill.forEach(function (x) {
+            if (x.a.amount !== null) return;
+            if (x.inv && x.inv.paidAmount > 0 && list.length === 1) {
+              x.a.amount = parseFloat(x.inv.paidAmount) || 0;
+            } else if (totalBill > 0 && base > 0) {
+              x.a.amount = Math.round(base * (x.bill / totalBill) * 100) / 100;
+            } else if (base > 0) {
+              x.a.amount = Math.round((base / list.length) * 100) / 100;
+            } else if (x.inv) {
+              x.a.amount = parseFloat(x.inv.paidAmount) || 0;
+            } else {
+              x.a.amount = 0;
+            }
           });
         }
         return list;
@@ -5065,27 +5084,80 @@ function shortPage(d) {
         var box = document.getElementById('ep-unapply-list');
         if (!box) return;
         var list = _parseAppliedToList(p.appliedTo, p.appliedAmt || p.amount);
+        var fromApplied = list.length > 0;
+
+        // Fallback: party ke Paid / PartPaid invoices dikhao (purane payments jahan AppliedTo blank ho)
+        if (!list.length && p.partyID) {
+          list = (DB.invoices || []).filter(function (inv) {
+            return inv.partyID === p.partyID &&
+              (parseFloat(inv.paidAmount) || 0) > 0 &&
+              inv.status !== 'Written-Off' && inv.status !== 'Cancelled';
+          }).map(function (inv) {
+            return {
+              invoiceNo: inv.invoiceNo,
+              amount: parseFloat(inv.paidAmount) || 0,
+              _fallback: true
+            };
+          });
+        }
+
         if (!list.length) {
-          box.innerHTML = '<div style="padding:12px;text-align:center;color:var(--muted);font-size:12px">Is payment pe koi invoice applied nahi hai</div>';
-          var btn = document.getElementById('ep-unapply-btn');
-          if (btn) btn.style.display = 'none';
+          box.innerHTML =
+            '<div style="padding:16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.5">' +
+            '<i class="fas fa-info-circle" style="display:block;font-size:20px;margin-bottom:8px;color:#94A3B8"></i>' +
+            'Is payment pe applied invoices nahi mile.<br>' +
+            '<span style="font-size:11px">Sheet me <b>Applied To</b> column check karo, ya pehle payment dubara record karo.</span></div>';
+          var btn0 = document.getElementById('ep-unapply-btn');
+          if (btn0) btn0.style.display = 'none';
           return;
         }
+
         var btn = document.getElementById('ep-unapply-btn');
         if (btn) btn.style.display = '';
-        box.innerHTML = list.map(function (a, idx) {
-          var inv = (DB.invoices || []).find(function (i) { return i.invoiceNo === a.invoiceNo; });
+
+        var note = fromApplied
+          ? '<div style="font-size:11px;color:var(--muted);padding:6px 8px 8px">Tick lagao jo invoices is payment se hataani hain → Pending / PartPaid</div>'
+          : '<div style="font-size:11px;color:#B06000;background:#FEF7E0;padding:8px 10px;border-radius:8px;margin-bottom:8px">' +
+            '<b>Applied To blank hai</b> — neeche is party ke paid invoices dikha rahe hain. Jo is payment se related hain unpe tick lagao.</div>';
+
+        var rows = list.map(function (a) {
+          var inv = (DB.invoices || []).find(function (i) {
+            return String(i.invoiceNo).trim() === String(a.invoiceNo).trim();
+          });
           var st = inv ? (inv.status || '') : '';
-          var amt = (a.amount != null ? a.amount : 0);
-          return '<label style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid #F1F5F9;cursor:pointer;font-size:12px">' +
-            '<input type="checkbox" class="ep-unapply-cb" value="' + String(a.invoiceNo).replace(/"/g, '&quot;') + '" style="width:16px;height:16px;accent-color:#C5221F">' +
-            '<span style="flex:1;min-width:0"><b style="font-family:monospace">' + String(a.invoiceNo).replace(/</g,'&lt;') + '</b>' +
-            (inv ? ' <span style="color:var(--muted)">· ' + String(inv.partyName || '').replace(/</g,'&lt;') + '</span>' : '') +
-            (st ? ' <span class="badge" style="font-size:9px;margin-left:4px">' + st + '</span>' : '') +
-            '</span>' +
-            '<span style="font-weight:700;color:#C5221F;white-space:nowrap">₹' + Math.round(amt).toLocaleString('en-IN') + '</span>' +
-            '</label>';
+          var stColor = st === 'Paid' ? '#188038' : st === 'PartPaid' ? '#B06000' : '#64748B';
+          var bill = inv ? (parseFloat(inv.netAmount || inv.billValue) || 0) : 0;
+          var paid = inv ? (parseFloat(inv.paidAmount) || 0) : (a.amount || 0);
+          var amt = a.amount != null ? a.amount : paid;
+          var invDate = inv ? (inv.invoiceDate || '') : '';
+          var safeNo = String(a.invoiceNo || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+          return (
+            '<label style="display:grid;grid-template-columns:28px 1fr auto;gap:8px;align-items:center;padding:10px 10px;border-bottom:1px solid #F1F5F9;cursor:pointer">' +
+              '<input type="checkbox" class="ep-unapply-cb" value="' + safeNo + '" data-amt="' + amt + '" style="width:18px;height:18px;accent-color:#C5221F;margin:0">' +
+              '<div style="min-width:0">' +
+                '<div style="font-weight:700;font-size:13px;font-family:ui-monospace,monospace">' + safeNo + '</div>' +
+                '<div style="font-size:11px;color:var(--muted);margin-top:2px">' +
+                  (invDate ? invDate + ' · ' : '') +
+                  (bill ? 'Bill ₹' + Math.round(bill).toLocaleString('en-IN') + ' · ' : '') +
+                  'Paid ₹' + Math.round(paid).toLocaleString('en-IN') +
+                  (st ? ' · <span style="color:' + stColor + ';font-weight:700">' + st + '</span>' : '') +
+                '</div>' +
+              '</div>' +
+              '<div style="text-align:right">' +
+                '<div style="font-weight:800;color:#C5221F;font-size:13px">₹' + Math.round(amt).toLocaleString('en-IN') + '</div>' +
+                '<div style="font-size:10px;color:var(--muted)">un-apply</div>' +
+              '</div>' +
+            '</label>'
+          );
         }).join('');
+
+        box.innerHTML =
+          note +
+          '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px 8px">' +
+            '<button type="button" class="btn btn-ghost btn-sm" onclick="document.querySelectorAll(\'.ep-unapply-cb\').forEach(function(c){c.checked=true})" style="font-size:11px">Select all</button>' +
+            '<button type="button" class="btn btn-ghost btn-sm" onclick="document.querySelectorAll(\'.ep-unapply-cb\').forEach(function(c){c.checked=false})" style="font-size:11px">Clear</button>' +
+          '</div>' +
+          '<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#fff">' + rows + '</div>';
       }
 
       function unapplySelectedInvoices() {
