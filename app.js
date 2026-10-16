@@ -4905,12 +4905,12 @@ function shortPage(d) {
             <span style="color:var(--muted)">Party</span>
             <span style="font-weight:600">${p.partyName}</span>
           </div>
-          <div class="edit-section-title" style="margin-top:8px;color:#C5221F">
+          <div class="edit-section-title" style="margin-top:8px;color:#C5221F;flex-shrink:0">
             <i class="fas fa-unlink" style="margin-right:6px"></i>Un-apply Invoices
             <span style="font-weight:500;font-size:11px;color:var(--muted);margin-left:6px">tick karke Pending banao</span>
           </div>
-          <div id="ep-unapply-list" style="margin-bottom:12px;max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:10px;padding:8px;background:#FAFBFC"></div>
-          <button type="button" class="btn btn-sm" id="ep-unapply-btn" style="background:#FCE8E6;color:#C5221F;border:1px solid #F5C6C2;margin-bottom:14px" onclick="unapplySelectedInvoices()">
+          <div id="ep-unapply-list" class="ep-unapply-wrap"></div>
+          <button type="button" class="btn btn-sm" id="ep-unapply-btn" style="background:#FCE8E6;color:#C5221F;border:1px solid #F5C6C2;margin-bottom:4px;flex-shrink:0;width:100%" onclick="unapplySelectedInvoices()">
             <i class="fas fa-undo"></i> Selected invoices ko Pending karo
           </button>
 
@@ -5087,9 +5087,13 @@ function shortPage(d) {
         var fromApplied = list.length > 0;
 
         // Fallback: party ke Paid / PartPaid invoices dikhao (purane payments jahan AppliedTo blank ho)
-        if (!list.length && p.partyID) {
+        if (!list.length) {
+          var pid = p.partyID || '';
+          var pname = (p.partyName || '').toString().trim().toLowerCase();
           list = (DB.invoices || []).filter(function (inv) {
-            return inv.partyID === p.partyID &&
+            var match = (pid && inv.partyID === pid) ||
+              (pname && String(inv.partyName || '').trim().toLowerCase() === pname);
+            return match &&
               (parseFloat(inv.paidAmount) || 0) > 0 &&
               inv.status !== 'Written-Off' && inv.status !== 'Cancelled';
           }).map(function (inv) {
@@ -5125,39 +5129,37 @@ function shortPage(d) {
             return String(i.invoiceNo).trim() === String(a.invoiceNo).trim();
           });
           var st = inv ? (inv.status || '') : '';
-          var stColor = st === 'Paid' ? '#188038' : st === 'PartPaid' ? '#B06000' : '#64748B';
+          var stColor = st === 'Paid' ? '#188038' : (st === 'PartPaid' ? '#B06000' : '#64748B');
           var bill = inv ? (parseFloat(inv.netAmount || inv.billValue) || 0) : 0;
           var paid = inv ? (parseFloat(inv.paidAmount) || 0) : (a.amount || 0);
-          var amt = a.amount != null ? a.amount : paid;
+          var amt = (a.amount != null ? a.amount : paid);
           var invDate = inv ? (inv.invoiceDate || '') : '';
-          var safeNo = String(a.invoiceNo || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+          var safeNo = String(a.invoiceNo || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
           return (
-            '<label style="display:grid;grid-template-columns:28px 1fr auto;gap:8px;align-items:center;padding:10px 10px;border-bottom:1px solid #F1F5F9;cursor:pointer">' +
-              '<input type="checkbox" class="ep-unapply-cb" value="' + safeNo + '" data-amt="' + amt + '" style="width:18px;height:18px;accent-color:#C5221F;margin:0">' +
-              '<div style="min-width:0">' +
-                '<div style="font-weight:700;font-size:13px;font-family:ui-monospace,monospace">' + safeNo + '</div>' +
-                '<div style="font-size:11px;color:var(--muted);margin-top:2px">' +
+            '<label class="ep-unapply-row">' +
+              '<input type="checkbox" class="ep-unapply-cb" value="' + safeNo + '" data-amt="' + amt + '">' +
+              '<span class="ep-unapply-main">' +
+                '<span class="ep-unapply-no">' + safeNo + '</span>' +
+                '<span class="ep-unapply-meta">' +
                   (invDate ? invDate + ' · ' : '') +
                   (bill ? 'Bill ₹' + Math.round(bill).toLocaleString('en-IN') + ' · ' : '') +
                   'Paid ₹' + Math.round(paid).toLocaleString('en-IN') +
-                  (st ? ' · <span style="color:' + stColor + ';font-weight:700">' + st + '</span>' : '') +
-                '</div>' +
-              '</div>' +
-              '<div style="text-align:right">' +
-                '<div style="font-weight:800;color:#C5221F;font-size:13px">₹' + Math.round(amt).toLocaleString('en-IN') + '</div>' +
-                '<div style="font-size:10px;color:var(--muted)">un-apply</div>' +
-              '</div>' +
+                  (st ? ' · <b style="color:' + stColor + '">' + st + '</b>' : '') +
+                '</span>' +
+              '</span>' +
+              '<span class="ep-unapply-amt">₹' + Math.round(amt).toLocaleString('en-IN') +
+                '<small>un-apply</small></span>' +
             '</label>'
           );
         }).join('');
 
         box.innerHTML =
           note +
-          '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px 8px">' +
-            '<button type="button" class="btn btn-ghost btn-sm" onclick="document.querySelectorAll(\'.ep-unapply-cb\').forEach(function(c){c.checked=true})" style="font-size:11px">Select all</button>' +
-            '<button type="button" class="btn btn-ghost btn-sm" onclick="document.querySelectorAll(\'.ep-unapply-cb\').forEach(function(c){c.checked=false})" style="font-size:11px">Clear</button>' +
+          '<div class="ep-unapply-toolbar">' +
+            '<button type="button" class="btn btn-ghost btn-sm" onclick="document.querySelectorAll(\'#ep-unapply-list .ep-unapply-cb\').forEach(function(c){c.checked=true})">Select all</button>' +
+            '<button type="button" class="btn btn-ghost btn-sm" onclick="document.querySelectorAll(\'#ep-unapply-list .ep-unapply-cb\').forEach(function(c){c.checked=false})">Clear</button>' +
           '</div>' +
-          '<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#fff">' + rows + '</div>';
+          '<div class="ep-unapply-scroll">' + rows + '</div>';
       }
 
       function unapplySelectedInvoices() {
