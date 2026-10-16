@@ -2174,6 +2174,11 @@
       margin-top: 2px;
     }
 
+    
+    th[data-tbl] { cursor: pointer; user-select: none; white-space: nowrap; }
+    th[data-tbl]:hover { color: var(--primary-d, #1967D2); background: #F8FAFC; }
+    th[data-tbl] .tbl-sort-ic { margin-left: 4px; }
+
     .edit-badge-row {
       background: #F8FAFC;
       border-radius: 8px;
@@ -4134,13 +4139,13 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Party</th>
-                      <th>Invoice No</th>
-                      <th>Due Date</th>
-                      <th>Days OD</th>
-                      <th class="num">Pending (₹)</th>
+                      <th data-tbl="od" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="od" data-col="invNo" data-type="str" data-label="Invoice No" style="cursor:pointer;user-select:none">Invoice No</th>
+                      <th data-tbl="od" data-col="due" data-type="date" data-label="Due Date" style="cursor:pointer;user-select:none">Due Date</th>
+                      <th data-tbl="od" data-col="days" data-type="num" data-label="Days OD" style="cursor:pointer;user-select:none">Days OD</th>
+                      <th class="num" data-tbl="od" data-col="pend" data-type="num" data-label="Pending (₹)" style="cursor:pointer;user-select:none">Pending (₹)</th>
                       <th>Last Follow-up</th>
-                      <th>Priority</th>
+                      <th data-tbl="od" data-col="pri" data-type="str" data-label="Priority" style="cursor:pointer;user-select:none">Priority</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
@@ -4194,12 +4199,12 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Party</th>
-                      <th>City</th>
-                      <th>Head</th>
-                      <th>Slab</th>
-                      <th class="num">Outstanding</th>
-                      <th>Status</th>
+                      <th data-tbl="parties" data-col="name" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="parties" data-col="city" data-type="str" data-label="City" style="cursor:pointer;user-select:none">City</th>
+                      <th data-tbl="parties" data-col="head" data-type="str" data-label="Head" style="cursor:pointer;user-select:none">Head</th>
+                      <th data-tbl="parties" data-col="slab" data-type="num" data-label="Slab" style="cursor:pointer;user-select:none">Slab</th>
+                      <th class="num" data-tbl="parties" data-col="out" data-type="num" data-label="Outstanding" style="cursor:pointer;user-select:none">Outstanding</th>
+                      <th data-tbl="parties" data-col="status" data-type="str" data-label="Status" style="cursor:pointer;user-select:none">Status</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
@@ -4347,16 +4352,16 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Invoice No</th>
-                      <th>Party</th>
-                      <th>Date</th>
-                      <th>Due Date</th>
-                      <th>Slab</th>
-                      <th class="num">Bill Amount (₹)</th>
-                      <th class="num">Difference (₹)</th>
-                      <th class="num">Paid (₹)</th>
-                      <th class="num">Pending (₹)</th>
-                      <th>Status</th>
+                      <th data-tbl="inv" data-col="invNo" data-type="str" data-label="Invoice No" style="cursor:pointer;user-select:none">Invoice No</th>
+                      <th data-tbl="inv" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="inv" data-col="date" data-type="date" data-label="Date" style="cursor:pointer;user-select:none">Date</th>
+                      <th data-tbl="inv" data-col="due" data-type="date" data-label="Due Date" style="cursor:pointer;user-select:none">Due Date</th>
+                      <th data-tbl="inv" data-col="slab" data-type="str" data-label="Slab" style="cursor:pointer;user-select:none">Slab</th>
+                      <th class="num" data-tbl="inv" data-col="bill" data-type="num" data-label="Bill Amount (₹)" style="cursor:pointer;user-select:none">Bill Amount (₹)</th>
+                      <th class="num" data-tbl="inv" data-col="diff" data-type="num" data-label="Difference (₹)" style="cursor:pointer;user-select:none">Difference (₹)</th>
+                      <th class="num" data-tbl="inv" data-col="paid" data-type="num" data-label="Paid (₹)" style="cursor:pointer;user-select:none">Paid (₹)</th>
+                      <th class="num" data-tbl="inv" data-col="pend" data-type="num" data-label="Pending (₹)" style="cursor:pointer;user-select:none">Pending (₹)</th>
+                      <th data-tbl="inv" data-col="status" data-type="str" data-label="Status" style="cursor:pointer;user-select:none">Status</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
@@ -4646,11 +4651,11 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Invoice No</th>
-                      <th>Party</th>
-                      <th>Invoice Date</th>
-                      <th>Due Date</th>
-                      <th class="num">Bill Value (₹)</th>
+                      <th data-tbl="s15" data-col="invNo" data-type="str" data-label="Invoice No" style="cursor:pointer;user-select:none">Invoice No</th>
+                      <th data-tbl="s15" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="s15" data-col="idate" data-type="date" data-label="Invoice Date" style="cursor:pointer;user-select:none">Invoice Date</th>
+                      <th data-tbl="s15" data-col="due" data-type="date" data-label="Due Date" style="cursor:pointer;user-select:none">Due Date</th>
+                      <th class="num" data-tbl="s15" data-col="bill" data-type="num" data-label="Bill Value (₹)" style="cursor:pointer;user-select:none">Bill Value (₹)</th>
                       <th class="num">TDS (₹)</th>
                       <th class="num" style="color:#34A853">1.5% Disc (₹)</th>
                       <th class="num" style="color:#475569;white-space:normal;line-height:1.3;min-width:120px">
@@ -4709,11 +4714,11 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Invoice No</th>
-                      <th>Party</th>
-                      <th>Invoice Date</th>
-                      <th>Due Date</th>
-                      <th class="num">Bill Value (₹)</th>
+                      <th data-tbl="s1" data-col="invNo" data-type="str" data-label="Invoice No" style="cursor:pointer;user-select:none">Invoice No</th>
+                      <th data-tbl="s1" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="s1" data-col="idate" data-type="date" data-label="Invoice Date" style="cursor:pointer;user-select:none">Invoice Date</th>
+                      <th data-tbl="s1" data-col="due" data-type="date" data-label="Due Date" style="cursor:pointer;user-select:none">Due Date</th>
+                      <th class="num" data-tbl="s1" data-col="bill" data-type="num" data-label="Bill Value (₹)" style="cursor:pointer;user-select:none">Bill Value (₹)</th>
                       <th class="num">TDS (₹)</th>
                       <th class="num" style="color:#F9AB00">1% Disc (₹)</th>
                       <th class="num" style="color:#475569;white-space:normal;line-height:1.3;min-width:120px">
@@ -4768,11 +4773,11 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Invoice No</th>
-                      <th>Party</th>
-                      <th>Invoice Date</th>
-                      <th>Due Date</th>
-                      <th class="num">Bill Value (₹)</th>
+                      <th data-tbl="sNil" data-col="invNo" data-type="str" data-label="Invoice No" style="cursor:pointer;user-select:none">Invoice No</th>
+                      <th data-tbl="sNil" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="sNil" data-col="idate" data-type="date" data-label="Invoice Date" style="cursor:pointer;user-select:none">Invoice Date</th>
+                      <th data-tbl="sNil" data-col="due" data-type="date" data-label="Due Date" style="cursor:pointer;user-select:none">Due Date</th>
+                      <th class="num" data-tbl="sNil" data-col="bill" data-type="num" data-label="Bill Value (₹)" style="cursor:pointer;user-select:none">Bill Value (₹)</th>
                       <th class="num">TDS (₹)</th>
                       <th class="num" style="color:#475569;white-space:normal;line-height:1.3;min-width:120px">Party
                         Pays<br><span style="font-size:10px;color:#1E8E3E">1.5%</span> <span
@@ -4833,13 +4838,13 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Invoice No</th>
-                      <th>Party</th>
-                      <th>Due Date</th>
-                      <th class="num">Expected (₹)</th>
-                      <th class="num">Paid (₹)</th>
-                      <th class="num" style="color:#7C3AED">Discount (₹)</th>
-                      <th class="num" style="color:var(--red)">Short by (₹)</th>
+                      <th data-tbl="sp" data-col="inv" data-type="str" data-label="Invoice" style="cursor:pointer;user-select:none">Invoice</th>
+                      <th data-tbl="sp" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="sp" data-col="date" data-type="date" data-label="Date" style="cursor:pointer;user-select:none">Date</th>
+                      <th class="num" data-tbl="sp" data-col="bill" data-type="num" data-label="Bill" style="cursor:pointer;user-select:none">Bill</th>
+                      <th class="num" data-tbl="sp" data-col="paid" data-type="num" data-label="Paid" style="cursor:pointer;user-select:none">Paid</th>
+                      <th class="num" data-tbl="sp" data-col="pend" data-type="num" data-label="Pending" style="cursor:pointer;user-select:none">Pending</th>
+                      <th class="num" data-tbl="sp" data-col="status" data-type="str" data-label="Status" style="cursor:pointer;user-select:none">Status</th>
                       <th>Status</th>
                       <th>Actions</th>
                     </tr>
@@ -4994,13 +4999,13 @@ body.gp-locked #global-process { pointer-events: auto; }
                   </thead>
                   <thead id="pay-thead">
                     <tr>
-                      <th style="cursor:pointer;user-select:none" onclick="setPaySort('party')">Party</th>
-                      <th style="cursor:pointer;user-select:none" onclick="setPaySort('date')">Date</th>
-                      <th>Mode</th>
-                      <th>Ref No</th>
-                      <th class="num" style="cursor:pointer;user-select:none" onclick="setPaySort('amt')">Amount</th>
-                      <th>Applied To</th>
-                      <th>By</th>
+                      <th data-tbl="pay" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="pay" data-col="date" data-type="date" data-label="Date" style="cursor:pointer;user-select:none">Date</th>
+                      <th data-tbl="pay" data-col="mode" data-type="str" data-label="Mode" style="cursor:pointer;user-select:none">Mode</th>
+                      <th data-tbl="pay" data-col="ref" data-type="str" data-label="Ref No" style="cursor:pointer;user-select:none">Ref No</th>
+                      <th class="num" data-tbl="pay" data-col="amt" data-type="num" data-label="Amount" style="cursor:pointer;user-select:none">Amount</th>
+                      <th data-tbl="pay" data-col="applied" data-type="str" data-label="Applied To" style="cursor:pointer;user-select:none">Applied To</th>
+                      <th data-tbl="pay" data-col="by" data-type="str" data-label="By" style="cursor:pointer;user-select:none">By</th>
                     </tr>
                   </thead>
                   <tbody id="pay-tbody"></tbody>
@@ -5113,15 +5118,15 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Date & Time</th>
-                      <th>Party</th>
-                      <th>Mode</th>
-                      <th>Contacted</th>
-                      <th>Notes</th>
-                      <th class="num">Promise (₹)</th>
-                      <th>Promise Date</th>
-                      <th>Priority</th>
-                      <th>Kept?</th>
+                      <th data-tbl="fu" data-col="dt" data-type="date" data-label="Date & Time" style="cursor:pointer;user-select:none">Date & Time</th>
+                      <th data-tbl="fu" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="fu" data-col="mode" data-type="str" data-label="Mode" style="cursor:pointer;user-select:none">Mode</th>
+                      <th data-tbl="fu" data-col="contact" data-type="str" data-label="Contacted" style="cursor:pointer;user-select:none">Contacted</th>
+                      <th data-tbl="fu" data-col="notes" data-type="str" data-label="Notes" style="cursor:pointer;user-select:none">Notes</th>
+                      <th class="num" data-tbl="fu" data-col="promise" data-type="num" data-label="Promise (₹)" style="cursor:pointer;user-select:none">Promise (₹)</th>
+                      <th data-tbl="fu" data-col="pdate" data-type="date" data-label="Promise Date" style="cursor:pointer;user-select:none">Promise Date</th>
+                      <th data-tbl="fu" data-col="pri" data-type="str" data-label="Priority" style="cursor:pointer;user-select:none">Priority</th>
+                      <th data-tbl="fu" data-col="kept" data-type="str" data-label="Kept?" style="cursor:pointer;user-select:none">Kept?</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
@@ -5189,13 +5194,13 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Party</th>
-                      <th>Follow-up Date</th>
-                      <th>Mode</th>
-                      <th class="num">Promise (₹)</th>
-                      <th>Promise Date</th>
-                      <th>Status</th>
-                      <th>Next Action</th>
+                      <th data-tbl="pt" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="pt" data-col="dt" data-type="date" data-label="Follow-up Date" style="cursor:pointer;user-select:none">Follow-up Date</th>
+                      <th data-tbl="pt" data-col="mode" data-type="str" data-label="Mode" style="cursor:pointer;user-select:none">Mode</th>
+                      <th class="num" data-tbl="pt" data-col="promise" data-type="num" data-label="Promise (₹)" style="cursor:pointer;user-select:none">Promise (₹)</th>
+                      <th data-tbl="pt" data-col="pdate" data-type="date" data-label="Promise Date" style="cursor:pointer;user-select:none">Promise Date</th>
+                      <th data-tbl="pt" data-col="kept" data-type="str" data-label="Status" style="cursor:pointer;user-select:none">Status</th>
+                      <th data-tbl="pt" data-col="next" data-type="str" data-label="Next Action" style="cursor:pointer;user-select:none">Next Action</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
@@ -5252,11 +5257,11 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Party</th>
-                      <th>Escalated On</th>
-                      <th>Escalated To</th>
-                      <th class="num">Outstanding (₹)</th>
-                      <th>Notes</th>
+                      <th data-tbl="esc" data-col="party" data-type="str" data-label="Party" style="cursor:pointer;user-select:none">Party</th>
+                      <th data-tbl="esc" data-col="dt" data-type="date" data-label="Escalated On" style="cursor:pointer;user-select:none">Escalated On</th>
+                      <th data-tbl="esc" data-col="to" data-type="str" data-label="Escalated To" style="cursor:pointer;user-select:none">Escalated To</th>
+                      <th class="num" data-tbl="esc" data-col="out" data-type="num" data-label="Outstanding (₹)" style="cursor:pointer;user-select:none">Outstanding (₹)</th>
+                      <th data-tbl="esc" data-col="notes" data-type="str" data-label="Notes" style="cursor:pointer;user-select:none">Notes</th>
                       <th class="num">Promise (₹)</th>
                       <th>Promise Date</th>
                       <th>Status</th>
@@ -5454,12 +5459,12 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Date &amp; Time</th>
-                      <th>Customer</th>
-                      <th>Mode</th>
-                      <th>Contacted</th>
-                      <th>Notes</th>
-                      <th class="num">Promise (₹)</th>
+                      <th data-tbl="rfu" data-col="dt" data-type="date" data-label="Date" style="cursor:pointer;user-select:none">Date</th>
+                      <th data-tbl="rfu" data-col="party" data-type="str" data-label="Customer" style="cursor:pointer;user-select:none">Customer</th>
+                      <th data-tbl="rfu" data-col="mode" data-type="str" data-label="Mode" style="cursor:pointer;user-select:none">Mode</th>
+                      <th data-tbl="rfu" data-col="notes" data-type="str" data-label="Notes" style="cursor:pointer;user-select:none">Notes</th>
+                      <th class="num" data-tbl="rfu" data-col="promise" data-type="num" data-label="Promise" style="cursor:pointer;user-select:none">Promise</th>
+                      <th class="num" data-tbl="rfu" data-col="pdate" data-type="date" data-label="Promise Date" style="cursor:pointer;user-select:none">Promise Date</th>
                       <th>Promise Date</th>
                       <th>Priority</th>
                       <th>Kept?</th>
@@ -5510,10 +5515,10 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Customer</th>
-                      <th>Logged</th>
-                      <th class="num">Promise (₹)</th>
-                      <th>Promise Date</th>
+                      <th data-tbl="rpt" data-col="party" data-type="str" data-label="Customer" style="cursor:pointer;user-select:none">Customer</th>
+                      <th data-tbl="rpt" data-col="dt" data-type="date" data-label="Date" style="cursor:pointer;user-select:none">Date</th>
+                      <th class="num" data-tbl="rpt" data-col="promise" data-type="num" data-label="Promise" style="cursor:pointer;user-select:none">Promise</th>
+                      <th data-tbl="rpt" data-col="pdate" data-type="date" data-label="Promise Date" style="cursor:pointer;user-select:none">Promise Date</th>
                       <th>Status</th>
                       <th>Notes</th>
                       <th>Actions</th>
@@ -5543,10 +5548,10 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Customer</th>
-                      <th>Escalated On</th>
-                      <th>Escalated To</th>
-                      <th class="num">Outstanding</th>
+                      <th data-tbl="resc" data-col="party" data-type="str" data-label="Customer" style="cursor:pointer;user-select:none">Customer</th>
+                      <th data-tbl="resc" data-col="dt" data-type="date" data-label="Date" style="cursor:pointer;user-select:none">Date</th>
+                      <th data-tbl="resc" data-col="to" data-type="str" data-label="Escalated To" style="cursor:pointer;user-select:none">Escalated To</th>
+                      <th class="num" data-tbl="resc" data-col="notes" data-type="str" data-label="Notes" style="cursor:pointer;user-select:none">Notes</th>
                       <th>Notes</th>
                       <th class="num">Promise (₹)</th>
                       <th>Priority</th>
@@ -5638,11 +5643,11 @@ body.gp-locked #global-process { pointer-events: auto; }
                   <table class="tbl" style="min-width:auto">
                     <thead>
                       <tr>
-                        <th>Customer</th>
-                        <th class="num">Pending (₹)</th>
-                        <th class="num">Entries</th>
-                        <th>Oldest</th>
-                      </tr>
+                      <th data-tbl="rdCust" data-col="name" data-type="str" data-label="Customer" style="cursor:pointer;user-select:none">Customer</th>
+                      <th class="num" data-tbl="rdCust" data-col="pend" data-type="num" data-label="Pending" style="cursor:pointer;user-select:none">Pending</th>
+                      <th class="num">Entries</th>
+                      <th>Oldest</th>
+                    </tr>
                     </thead>
                     <tbody id="rd-cust-tbody"></tbody>
                   </table>
@@ -5691,10 +5696,10 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Customer</th>
-                      <th class="num">0–7d</th>
-                      <th class="num">8–15d</th>
-                      <th class="num">16–30d</th>
+                      <th data-tbl="ra" data-col="name" data-type="str" data-label="Customer" style="cursor:pointer;user-select:none">Customer</th>
+                      <th class="num" data-tbl="ra" data-col="pend" data-type="num" data-label="Pending" style="cursor:pointer;user-select:none">Pending</th>
+                      <th class="num" data-tbl="ra" data-col="days" data-type="num" data-label="Days" style="cursor:pointer;user-select:none">Days</th>
+                      <th class="num" data-tbl="ra" data-col="last" data-type="date" data-label="Last Sale" style="cursor:pointer;user-select:none">Last Sale</th>
                       <th class="num">30+d</th>
                       <th class="num">Total</th>
                       <th>Actions</th>
@@ -5729,11 +5734,11 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th style="width:90px">ID</th>
-                      <th>Name</th>
-                      <th>Phone</th>
-                      <th>City</th>
-                      <th style="width:100px">Status</th>
+                      <th data-tbl="rc" data-col="name" data-type="str" data-label="Customer" style="cursor:pointer;user-select:none">Customer</th>
+                      <th data-tbl="rc" data-col="phone" data-type="str" data-label="Phone" style="cursor:pointer;user-select:none">Phone</th>
+                      <th data-tbl="rc" data-col="city" data-type="str" data-label="City" style="cursor:pointer;user-select:none">City</th>
+                      <th class="num" data-tbl="rc" data-col="pend" data-type="num" data-label="Pending" style="cursor:pointer;user-select:none">Pending</th>
+                      <th data-tbl="rc" data-col="status" data-type="str" data-label="Status" style="cursor:pointer;user-select:none">Status</th>
                       <th style="width:180px;text-align:right">Actions</th>
                     </tr>
                   </thead>
@@ -5791,12 +5796,12 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th style="width:130px">Payment ID</th>
-                      <th>Customer</th>
-                      <th style="width:100px">Date</th>
-                      <th style="width:100px">Mode</th>
-                      <th style="width:130px">Reference</th>
-                      <th class="num" style="width:120px">Amount (₹)</th>
+                      <th data-tbl="rpay" data-col="party" data-type="str" data-label="Customer" style="cursor:pointer;user-select:none">Customer</th>
+                      <th data-tbl="rpay" data-col="date" data-type="date" data-label="Date" style="cursor:pointer;user-select:none">Date</th>
+                      <th data-tbl="rpay" data-col="mode" data-type="str" data-label="Mode" style="cursor:pointer;user-select:none">Mode</th>
+                      <th class="num" data-tbl="rpay" data-col="amt" data-type="num" data-label="Amount" style="cursor:pointer;user-select:none">Amount</th>
+                      <th data-tbl="rpay" data-col="ref" data-type="str" data-label="Ref" style="cursor:pointer;user-select:none">Ref</th>
+                      <th class="num" data-tbl="rpay" data-col="by" data-type="str" data-label="By" style="cursor:pointer;user-select:none">By</th>
                       <th style="width:130px">By</th>
                     </tr>
                   </thead>
@@ -5903,11 +5908,11 @@ body.gp-locked #global-process { pointer-events: auto; }
                 <table class="tbl">
                   <thead>
                     <tr>
-                      <th>Date</th>
-                      <th>Customer</th>
-                      <th>Qty Summary</th>
-                      <th class="num">Amount</th>
-                      <th class="num">Pending</th>
+                      <th data-tbl="rs" data-col="date" data-type="date" data-label="Sale Date" style="cursor:pointer;user-select:none">Sale Date</th>
+                      <th data-tbl="rs" data-col="cust" data-type="str" data-label="Customer" style="cursor:pointer;user-select:none">Customer</th>
+                      <th class="num" data-tbl="rs" data-col="qty" data-type="num" data-label="Qty" style="cursor:pointer;user-select:none">Qty</th>
+                      <th class="num" data-tbl="rs" data-col="amt" data-type="num" data-label="Amount" style="cursor:pointer;user-select:none">Amount</th>
+                      <th class="num" data-tbl="rs" data-col="pend" data-type="num" data-label="Pending" style="cursor:pointer;user-select:none">Pending</th>
                     </tr>
                   </thead>
                   <tbody id="rs-tbody"></tbody>
@@ -6462,7 +6467,7 @@ body.gp-locked #global-process { pointer-events: auto; }
   </div>
   </div>
 
-  <script src="./app.js?v=20261017d"></script>
+  <script src="./app.js?v=20261017f"></script>
   </div>
 
   <!-- ===== EDIT INVOICE DRAWER ===== -->
